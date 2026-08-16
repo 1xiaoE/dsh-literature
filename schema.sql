@@ -53,7 +53,13 @@ CREATE TABLE IF NOT EXISTS pushes (
   agent_scored_candidates INTEGER,
   llm_call_count INTEGER,
   llm_retry_count INTEGER,
-  pdf_attempt_count INTEGER
+  pdf_attempt_count INTEGER,
+  arxiv_requests INTEGER,                        -- arXiv scheduler provenance
+  arxiv_dedup_hits INTEGER,
+  arxiv_429_count INTEGER,
+  arxiv_retry_count INTEGER,
+  arxiv_rate_limited INTEGER,
+  arxiv_wait_ms INTEGER
 );
 
 -- Human-in-the-loop (NEED_USER_ACTION): five-part issue record per push.
@@ -177,4 +183,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;

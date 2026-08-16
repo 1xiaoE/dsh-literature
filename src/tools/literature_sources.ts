@@ -471,11 +471,18 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         )
       }
 
+      const arxivStats = rt.registry.adapterStats('arxiv')
       rt.perf.add(pushId, {
         retrievalMs: tRankingStart - tRetrievalStart,
         deterministicRankingMs: tRankingEnd - tRankingStart,
         rawCandidates: recent.rawCount + landmark.rawCount,
         deterministicCandidates: rows.length,
+        arxivRequests: arxivStats.requests,
+        arxivDedupHits: arxivStats.dedupHits,
+        arxiv429Count: arxivStats['429Count'],
+        arxivRetryCount: arxivStats.retryCount,
+        arxivRateLimited: arxivStats.rateLimited,
+        arxivWaitMs: arxivStats.waitMs,
       })
 
       return {

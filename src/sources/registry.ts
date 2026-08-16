@@ -154,6 +154,12 @@ export class SourceRegistry {
     return this.adapters.map((a) => a.name)
   }
 
+  /** Operational counters of one adapter (requests/dedup/429/…), for provenance. */
+  adapterStats(name: string): Record<string, number> {
+    const a = this.adapters.find((x) => x.name === name)
+    return a?.stats ? (Object.fromEntries(Object.entries(a.stats())) as Record<string, number>) : {}
+  }
+
   private retrievalAdapters(): SourceAdapter[] {
     // crossref search is not a relevance signal — exclude from candidate retrieval
     return this.adapters.filter((a) => a.name !== 'crossref')

@@ -28,6 +28,12 @@ export interface PushPerf {
   llmCallCount: number
   llmRetryCount: number
   pdfAttemptCount: number
+  arxivRequests: number
+  arxivDedupHits: number
+  arxiv429Count: number
+  arxivRetryCount: number
+  arxivRateLimited: number
+  arxivWaitMs: number
 }
 
 export type PushPerfPatch = Partial<PushPerf>
@@ -62,7 +68,9 @@ export class PerfTracker {
          pdf_preflight_ms = ?, pdf_download_ms = ?, parsing_ms = ?,
          fulltext_read_ms = ?, report_generation_ms = ?, total_ms = ?,
          raw_candidates = ?, deterministic_candidates = ?, agent_scored_candidates = ?,
-         llm_call_count = ?, llm_retry_count = ?, pdf_attempt_count = ?
+         llm_call_count = ?, llm_retry_count = ?, pdf_attempt_count = ?,
+         arxiv_requests = ?, arxiv_dedup_hits = ?, arxiv_429_count = ?,
+         arxiv_retry_count = ?, arxiv_rate_limited = ?, arxiv_wait_ms = ?
        WHERE id = ?`,
     ).run(
       merged.retrievalMs || null,
@@ -80,6 +88,12 @@ export class PerfTracker {
       merged.llmCallCount || null,
       merged.llmRetryCount || null,
       merged.pdfAttemptCount || null,
+      merged.arxivRequests || null,
+      merged.arxivDedupHits || null,
+      merged.arxiv429Count || null,
+      merged.arxivRetryCount || null,
+      merged.arxivRateLimited || null,
+      merged.arxivWaitMs || null,
       pushId,
     )
     this.map.delete(pushId)
@@ -104,6 +118,12 @@ export function emptyPerf(): PushPerf {
     llmCallCount: 0,
     llmRetryCount: 0,
     pdfAttemptCount: 0,
+    arxivRequests: 0,
+    arxivDedupHits: 0,
+    arxiv429Count: 0,
+    arxivRetryCount: 0,
+    arxivRateLimited: 0,
+    arxivWaitMs: 0,
   }
 }
 

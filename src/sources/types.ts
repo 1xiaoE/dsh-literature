@@ -68,6 +68,8 @@ export interface SourceAdapter {
   readonly name: string
   /** 'api_key' when the source authenticates with a configured key, else 'anonymous' */
   readonly authMode?: 'anonymous' | 'api_key'
+  /** optional operational counters (requests/dedup/429/retries) for provenance */
+  stats?: () => Record<string, number>
   /** retrieve candidates for the planned queries (source-specific query style) */
   search(params: SearchParams): Promise<SearchHit[]>
   /** enrich a paper with metadata this adapter can supply (doi, citations, OA location) */
