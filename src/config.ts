@@ -14,6 +14,8 @@ export interface RankingWeights {
   topicSimilarity: number
   /** weight of fulltext_available (open PDF obtainable) */
   fulltextAvailability: number
+  /** weight of the deterministic stage relevance hint */
+  stageRelevance: number
 }
 
 export interface AgentRankingWeights {
@@ -36,11 +38,43 @@ export interface StageDef {
   downweightKeywords: string[]
   /** concepts that disqualify a paper for this stage (stage_relevance = 0) */
   excludeKeywords: string[]
+  /** stage-specific retrieval queries (English, combined with topic queries) */
+  searchQueries: string[]
+}
+
+/**
+ * A normalized topic. The user may type Chinese, but academic retrieval uses
+ * the English canonical/secondary queries; the display name is for tracking.
+ */
+export interface TopicDef {
+  id: string
+  displayName: string
+  /** primary academic queries (English) */
+  canonicalQueries: string[]
+  /** secondary queries (English) */
+  secondaryQueries: string[]
+  /** candidates matching any negative term are dropped at merge time */
+  negativeTerms: string[]
+}
+
+export interface RetrievalConfig {
+  /** recent pool window in years */
+  recentYears: number
+  /** per (source, query) result limit */
+  perQueryLimit: number
+  /** max landmark candidates admitted to the merged pool */
+  landmarkMaxCandidates: number
+  /** minimum deterministic landmark-eligibility score */
+  landmarkMinScore: number
+  /** minimum stage_relevance_hint for landmark eligibility */
+  landmarkMinHint: number
+  /** candidates with lower topic similarity are dropped as off-topic noise */
+  minTopicSimilarity: number
 }
 
 export interface LiteratureConfig {
-  /** default topic(s); the first is used when a tool call omits topic */
-  topics: string[]
+  /** normalized topics (Chinese display name + English queries); first is default */
+  topics: TopicDef[]
   /**
    * Report archive root. Empty string resolves to the canonical data-dir
    * reports path (~/.local/share/dsh-literature/reports). Desktop/library
@@ -50,7 +84,7 @@ export interface LiteratureConfig {
   libraryRoot: string
   /** XDG data dir for db/pdfs/cache/reports; empty string resolves to the default */
   dataDir: string
-  /** preferred publication years (recency); empty computes last 5 years */
+  /** preferred publication years (recency); empty computes from retrieval.recentYears */
   yearsPrefer: number[]
   /** papers per push (1 per spec) */
   perPush: number
@@ -60,8 +94,10 @@ export interface LiteratureConfig {
   targetPapersPerStage: number
   /** minimum agent stage_relevance_score for a paper to be pickable as Top 1 */
   stageRelevanceThreshold: number
-  /** deterministic pre-ranking keeps the top N candidates */
+  /** deterministic pre-ranking keeps the top N candidates for the agent */
   preRankTopN: number
+  /** retrieval pool configuration (recent / landmark) */
+  retrieval: RetrievalConfig
   ranking: RankingWeights
   agentRanking: AgentRankingWeights
   fulltext: {
@@ -81,10 +117,11 @@ export interface LiteratureConfig {
 }
 
 export const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
-  recency: 0.2,
-  impact: 0.25,
-  topicSimilarity: 0.3,
-  fulltextAvailability: 0.25,
+  recency: 0.15,
+  impact: 0.15,
+  topicSimilarity: 0.2,
+  fulltextAvailability: 0.2,
+  stageRelevance: 0.3,
 }
 
 export const DEFAULT_AGENT_RANKING_WEIGHTS: AgentRankingWeights = {
@@ -93,6 +130,41 @@ export const DEFAULT_AGENT_RANKING_WEIGHTS: AgentRankingWeights = {
   representativeness: 0.15,
   novelty: 0.1,
   stageRelevance: 0.15,
+}
+
+/** Default topic: Chinese display name, English academic queries. */
+export const DEFAULT_TOPICS: TopicDef[] = [
+  {
+    id: 'legged_robot_control',
+    displayName: '足式机器人控制',
+    canonicalQueries: [
+      'legged robot locomotion control',
+      'legged robot control',
+      'quadruped locomotion control',
+    ],
+    secondaryQueries: ['dynamic legged locomotion', 'biped locomotion control'],
+    negativeTerms: [
+      'agricultural robot',
+      'uav',
+      'unmanned aerial',
+      'surgical robot',
+      'welding',
+      'assembly line',
+      'grasping',
+      'manipulation',
+      'landslide',
+      'power grid',
+    ],
+  },
+]
+
+export const DEFAULT_RETRIEVAL: RetrievalConfig = {
+  recentYears: 5,
+  perQueryLimit: 8,
+  landmarkMaxCandidates: 6,
+  landmarkMinScore: 0.35,
+  landmarkMinHint: 0.25,
+  minTopicSimilarity: 0.1,
 }
 
 /** Default stage progression for 足式机器人控制. */
@@ -111,6 +183,15 @@ export const DEFAULT_STAGES: StageDef[] = [
       'mpc', 'perceptive', 'vision', 'perception', 'terrain', 'parkour', 'sim-to-real', 'domain randomization',
     ],
     excludeKeywords: [],
+    searchQueries: [
+      'legged robot dynamics',
+      'locomotion control fundamentals',
+      'contact dynamics legged robot',
+      'impedance control legged robot',
+      'whole body control legged robot',
+      'inverted pendulum walking control',
+      'virtual model control locomotion'
+    ],
   },
   {
     label: '动力学/接触控制',
@@ -125,6 +206,14 @@ export const DEFAULT_STAGES: StageDef[] = [
       'reinforcement learning', 'neural network', 'policy gradient', 'vision', 'perception', 'parkour',
     ],
     excludeKeywords: [],
+    searchQueries: [
+      'legged robot contact force control',
+      'whole body control quadruped',
+      'ground reaction force legged locomotion',
+      'friction cone contact planning legged robot',
+      'dynamic biped walking control',
+      'force distribution legged robot'
+    ],
   },
   {
     label: 'MPC',
@@ -138,6 +227,13 @@ export const DEFAULT_STAGES: StageDef[] = [
       'reinforcement learning', 'policy gradient', 'neural network', 'vision', 'perception',
     ],
     excludeKeywords: [],
+    searchQueries: [
+      'model predictive control legged locomotion',
+      'whole body mpc quadruped',
+      'trajectory optimization legged robot',
+      'centroidal dynamics mpc biped',
+      'receding horizon legged robot control'
+    ],
   },
   {
     label: 'RL locomotion',
@@ -150,6 +246,13 @@ export const DEFAULT_STAGES: StageDef[] = [
     ],
     downweightKeywords: ['whole-body mpc', 'model predictive control', 'trajectory optimization', 'vision', 'perception'],
     excludeKeywords: [],
+    searchQueries: [
+      'reinforcement learning quadruped locomotion',
+      'deep reinforcement learning legged locomotion',
+      'teacher student policy locomotion',
+      'reward design legged locomotion',
+      'learning bipedal walking'
+    ],
   },
   {
     label: '鲁棒控制',
@@ -162,6 +265,13 @@ export const DEFAULT_STAGES: StageDef[] = [
     ],
     downweightKeywords: ['planning only', 'offline planning', 'map-based'],
     excludeKeywords: [],
+    searchQueries: [
+      'robust legged locomotion control',
+      'push recovery biped robot',
+      'capture point humanoid balancing',
+      'disturbance rejection quadruped',
+      'legged robot fall recovery'
+    ],
   },
   {
     label: 'terrain adaptation',
@@ -174,6 +284,13 @@ export const DEFAULT_STAGES: StageDef[] = [
     ],
     downweightKeywords: [],
     excludeKeywords: [],
+    searchQueries: [
+      'perceptive locomotion quadruped',
+      'terrain adaptation legged robot',
+      'rough terrain quadruped locomotion',
+      'parkour legged robot',
+      'elevation mapping legged locomotion'
+    ],
   },
   {
     label: 'sim-to-real',
@@ -185,6 +302,13 @@ export const DEFAULT_STAGES: StageDef[] = [
     ],
     downweightKeywords: ['simulation only', 'no hardware'],
     excludeKeywords: [],
+    searchQueries: [
+      'sim to real legged robot',
+      'domain randomization locomotion',
+      'zero shot transfer quadruped',
+      'simulation to reality legged robot',
+      'hardware deployment legged locomotion'
+    ],
   },
   {
     label: '前沿方法',
@@ -196,6 +320,13 @@ export const DEFAULT_STAGES: StageDef[] = [
     ],
     downweightKeywords: [],
     excludeKeywords: [],
+    searchQueries: [
+      'foundation model robot locomotion',
+      'diffusion policy legged robot',
+      'world model legged robot',
+      'vision language model robot control',
+      'generalist robot locomotion'
+    ],
   },
 ]
 
@@ -213,15 +344,27 @@ export function defaultConfig(): LiteratureConfig {
   const years: number[] = []
   for (let y = now - RECENCY_WINDOW_YEARS + 1; y <= now; y += 1) years.push(y)
   return {
-    topics: ['足式机器人控制'],
+    topics: DEFAULT_TOPICS.map((t) => ({
+      ...t,
+      canonicalQueries: [...t.canonicalQueries],
+      secondaryQueries: [...t.secondaryQueries],
+      negativeTerms: [...t.negativeTerms],
+    })),
     libraryRoot: '',
     dataDir: '',
     yearsPrefer: years,
     perPush: 1,
-    stageOrder: DEFAULT_STAGES.map((s) => ({ ...s, preferredKeywords: [...s.preferredKeywords], downweightKeywords: [...s.downweightKeywords], excludeKeywords: [...s.excludeKeywords] })),
+    stageOrder: DEFAULT_STAGES.map((s) => ({
+      ...s,
+      preferredKeywords: [...s.preferredKeywords],
+      downweightKeywords: [...s.downweightKeywords],
+      excludeKeywords: [...s.excludeKeywords],
+      searchQueries: [...s.searchQueries],
+    })),
     targetPapersPerStage: 3,
     stageRelevanceThreshold: 0.6,
-    preRankTopN: 10,
+    preRankTopN: 15,
+    retrieval: { ...DEFAULT_RETRIEVAL },
     ranking: { ...DEFAULT_RANKING_WEIGHTS },
     agentRanking: { ...DEFAULT_AGENT_RANKING_WEIGHTS },
     fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext' },
@@ -266,7 +409,19 @@ function isStageDef(v: unknown): v is StageDef {
     typeof v.scope === 'string' &&
     Array.isArray(v.preferredKeywords) &&
     Array.isArray(v.downweightKeywords) &&
-    Array.isArray(v.excludeKeywords)
+    Array.isArray(v.excludeKeywords) &&
+    Array.isArray(v.searchQueries)
+  )
+}
+
+function isTopicDef(v: unknown): v is TopicDef {
+  return (
+    isRecord(v) &&
+    typeof v.id === 'string' &&
+    typeof v.displayName === 'string' &&
+    Array.isArray(v.canonicalQueries) &&
+    Array.isArray(v.secondaryQueries) &&
+    Array.isArray(v.negativeTerms)
   )
 }
 
@@ -275,7 +430,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
   const base = defaultConfig()
   if (!partial) return base
   const out: LiteratureConfig = {
-    topics: pickStringArray(partial, 'topics', base.topics),
+    topics: base.topics.map((t) => ({ ...t, canonicalQueries: [...t.canonicalQueries], secondaryQueries: [...t.secondaryQueries], negativeTerms: [...t.negativeTerms] })),
     libraryRoot: pickString(partial, 'libraryRoot', base.libraryRoot),
     dataDir: pickString(partial, 'dataDir', base.dataDir),
     yearsPrefer: pickNumberArray(partial, 'yearsPrefer', base.yearsPrefer),
@@ -284,14 +439,33 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
     targetPapersPerStage: pickNumber(partial, 'targetPapersPerStage', base.targetPapersPerStage),
     stageRelevanceThreshold: pickNumber(partial, 'stageRelevanceThreshold', base.stageRelevanceThreshold),
     preRankTopN: pickNumber(partial, 'preRankTopN', base.preRankTopN),
+    retrieval: { ...base.retrieval },
     ranking: { ...base.ranking },
     agentRanking: { ...base.agentRanking },
     fulltext: { ...base.fulltext },
     http: { ...base.http },
   }
+  if (Array.isArray(partial.topics)) {
+    const defs = partial.topics.filter(isTopicDef)
+    if (defs.length > 0) out.topics = defs
+  }
   if (Array.isArray(partial.stageOrder)) {
     const defs = partial.stageOrder.filter(isStageDef)
     if (defs.length > 0) out.stageOrder = defs
+  }
+  if (isRecord(partial.retrieval)) {
+    out.retrieval = {
+      recentYears: pickNumber(partial.retrieval, 'recentYears', base.retrieval.recentYears),
+      perQueryLimit: pickNumber(partial.retrieval, 'perQueryLimit', base.retrieval.perQueryLimit),
+      landmarkMaxCandidates: pickNumber(
+        partial.retrieval,
+        'landmarkMaxCandidates',
+        base.retrieval.landmarkMaxCandidates,
+      ),
+      landmarkMinScore: pickNumber(partial.retrieval, 'landmarkMinScore', base.retrieval.landmarkMinScore),
+      landmarkMinHint: pickNumber(partial.retrieval, 'landmarkMinHint', base.retrieval.landmarkMinHint),
+      minTopicSimilarity: pickNumber(partial.retrieval, 'minTopicSimilarity', base.retrieval.minTopicSimilarity),
+    }
   }
   if (isRecord(partial.ranking)) {
     out.ranking = {
@@ -303,6 +477,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
         'fulltextAvailability',
         base.ranking.fulltextAvailability,
       ),
+      stageRelevance: pickNumber(partial.ranking, 'stageRelevance', base.ranking.stageRelevance),
     }
   }
   if (isRecord(partial.agentRanking)) {

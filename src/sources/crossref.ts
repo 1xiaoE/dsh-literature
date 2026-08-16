@@ -1,8 +1,10 @@
 /**
- * Crossref adapter: DOI metadata fallback (bibliographic + citation signal).
- * API: https://api.crossref.org/works
+ * Crossref adapter: bibliographic / DOI / venue metadata COMPLETION ONLY.
+ * Per design, Crossref search results are NOT treated as a domain-relevance
+ * signal, so search() returns no candidates; expand() fills in metadata and
+ * pdfCandidates() exposes publisher links as a fallback source.
  */
-import type { PaperRef, PdfCandidate, SearchParams, SourceAdapter } from './types.js'
+import type { PaperRef, PdfCandidate, SearchHit, SearchParams, SourceAdapter } from './types.js'
 
 const API = 'https://api.crossref.org/works'
 
@@ -41,13 +43,9 @@ export class CrossrefAdapter implements SourceAdapter {
     }
   }
 
-  async search(params: SearchParams): Promise<PaperRef[]> {
-    const minYear = Math.min(...params.years)
-    const maxYear = Math.max(...params.years)
-    const filter = `from-pub-date:${minYear}-01-01,until-pub-date:${maxYear}-12-31`
-    const url = `${API}?query.bibliographic=${encodeURIComponent(params.topic)}&filter=${filter}&rows=${params.limit}&select=DOI,title,author,container-title,issued,is-referenced-by-count,abstract,URL,link`
-    const data = (await this.getJson(url)) as { message?: { items?: CrossrefWork[] } }
-    return (data.message?.items ?? []).map((w) => this.toRef(w)).filter((p): p is PaperRef => p !== null)
+  async search(_params: SearchParams): Promise<SearchHit[]> {
+    // Crossref is metadata completion only — not a relevance signal.
+    return []
   }
 
   private toRef(w: CrossrefWork): PaperRef | null {

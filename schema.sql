@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   fulltext_available   INTEGER NOT NULL DEFAULT 0,
   stage_relevance_hint REAL,                      -- deterministic hint (program)
   stage_relevance_score REAL,                     -- agent-assigned (semantic ranking)
+  candidate_pool       TEXT NOT NULL DEFAULT 'recent'
+                       CHECK (candidate_pool IN ('recent','landmark')),
   relevance_score      REAL,                      -- agent semantic ranking trace
   learning_value_score REAL,
   representative_score REAL,
@@ -88,6 +90,18 @@ CREATE TABLE IF NOT EXISTS fulltext_chunks (
   PRIMARY KEY (paper_id, seq)
 );
 
+CREATE TABLE IF NOT EXISTS retrievals (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id         INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id        TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  generated_query TEXT NOT NULL,
+  query_language  TEXT NOT NULL DEFAULT 'en',
+  source_adapter  TEXT NOT NULL,
+  retrieval_score REAL,
+  candidate_pool  TEXT NOT NULL CHECK (candidate_pool IN ('recent','landmark')),
+  retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS stages (
   topic           TEXT PRIMARY KEY,
   current         INTEGER NOT NULL DEFAULT 1,
@@ -96,4 +110,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;

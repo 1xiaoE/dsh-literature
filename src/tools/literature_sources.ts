@@ -1,18 +1,27 @@
 /**
- * Tool: literature_sources — search candidates via all SourceAdapters,
- * merge/dedup, run deterministic pre-ranking (Stage A) with configurable
- * weights, persist papers + candidates for the push, and return the Top N.
- * Stage B (semantic ranking) is the agent's job.
+ * Tool: literature_sources — Literature Query Planner driven retrieval:
+ *
+ * 1. topic + current stage → planned queries (English; canonical/secondary/
+ *    stage-search terms; recent + landmark pools planned separately).
+ * 2. RecentPool (recent_years window) and LandmarkPool (year-unconstrained,
+ *    eligibility-scored, capped) are retrieved independently, tagged and
+ *    merged; negative terms drop off-topic hits.
+ * 3. Deterministic pre-ranking (recency/impact/topic-similarity/fulltext +
+ *    stage relevance hint) keeps the Top N for agent semantic ranking.
+ * 4. Full retrieval provenance (generated_query / language / source /
+ *    retrieval_score / pool / retrieved_at) is persisted per hit.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { upsertPaper, type PaperRow } from '../db.js'
 import { preRank, stageRelevanceHint, type PreRankResult, type StageRelevanceResult } from '../lib/ranking.js'
-import { currentYear } from '../config.js'
+import { currentYear, type TopicDef } from '../config.js'
 import { seenPaperIds, startPush } from '../lib/history.js'
 import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
-import type { PaperRef } from '../sources/types.js'
+import { planQueries, resolveTopic, applyNegativeFilter } from '../lib/planner.js'
+import type { PaperRef, PlannedQuery } from '../sources/types.js'
 import { canonicalId } from '../sources/types.js'
+import { mergeWithLabels, type RetrievalProvenance } from '../sources/registry.js'
 
 export interface SourcesInput {
   topic?: string
@@ -23,7 +32,8 @@ export interface SourcesInput {
 
 export interface SourcesOutput {
   pushId: number
-  topic: string
+  topicId: string
+  topicDisplayName: string
   stage: number
   stageLabel: string
   stageScope: string
@@ -31,6 +41,13 @@ export interface SourcesOutput {
   stageDownweightKeywords: string[]
   stageExcludeKeywords: string[]
   stageRelevanceThreshold: number
+  queriesGenerated: Array<{ text: string; kind: string; pool: string }>
+  rawCount: number
+  dedupedCount: number
+  recentCount: number
+  landmarkCount: number
+  negativeDropped: number
+  offTopicDropped: number
   total: number
   candidates: Array<{
     paperId: string
@@ -44,6 +61,7 @@ export interface SourcesOutput {
     citations?: number
     abstract?: string
     isSeen: boolean
+    candidatePool: 'recent' | 'landmark'
     fulltextAvailable: boolean
     recencyScore: number
     impactScore: number
@@ -53,31 +71,9 @@ export interface SourcesOutput {
     stageExcluded: boolean
     matchedPreferred: string[]
     matchedDownweight: string[]
+    retrieval: Array<{ source: string; query: string; score?: number }>
     rankHint: number
   }>
-}
-
-function paperToRow(paper: PaperRef): PaperRow {
-  return {
-    id: canonicalId(paper),
-    title: paper.title,
-    authors: JSON.stringify(paper.authors),
-    venue: paper.venue ?? null,
-    year: paper.year ?? null,
-    doi: paper.doi ?? null,
-    arxiv_id: paper.arxivId ?? null,
-    openalex_id: paper.openalexId ?? null,
-    url: paper.url ?? null,
-    abstract: paper.abstract ?? null,
-    citations: paper.citations ?? null,
-    bibtex: null,
-    metadata_source: paper.metadataSource,
-  }
-}
-
-/** Cheap availability heuristic for pre-ranking; the fetch tool verifies for real. */
-function quickPdfAvailability(paper: PaperRef): boolean {
-  return Boolean(paper.arxivId || paper.url)
 }
 
 /** Omit keys whose value is undefined — tool output must be lossless JSON. */
@@ -113,19 +109,42 @@ export function rowToRef(row: PaperRow): PaperRef {
   }
 }
 
+function paperToRow(paper: PaperRef): PaperRow {
+  return {
+    id: canonicalId(paper),
+    title: paper.title,
+    authors: JSON.stringify(paper.authors),
+    venue: paper.venue ?? null,
+    year: paper.year ?? null,
+    doi: paper.doi ?? null,
+    arxiv_id: paper.arxivId ?? null,
+    openalex_id: paper.openalexId ?? null,
+    url: paper.url ?? null,
+    abstract: paper.abstract ?? null,
+    citations: paper.citations ?? null,
+    bibtex: null,
+    metadata_source: paper.metadataSource,
+  }
+}
+
+/** Cheap availability heuristic for pre-ranking; the fetch tool verifies for real. */
+function quickPdfAvailability(paper: PaperRef): boolean {
+  return Boolean(paper.arxivId || paper.url)
+}
+
 export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
   return defineTool({
     name: 'literature_sources',
     description:
-      '检索主题候选论文（arXiv/OpenAlex/Crossref 多源合并去重），运行确定性预排序（时效/影响力/主题相似度/全文可得性，权重可配置）并落库，返回 Top N 候选供语义排序。',
+      'Query Planner 驱动的候选检索：topic+stage 生成英文查询（Recent/Landmark 双池独立检索、合并去重、负向词过滤），确定性预排序后返回 Top N 供 agent 语义排序。输出全部生成查询与检索溯源。',
     parameters: {
-      topic: { type: 'string', description: '主题，缺省用配置默认主题' },
+      topic: { type: 'string', description: '主题 id 或显示名，缺省用配置默认主题' },
       years: {
         type: 'array',
         items: { type: 'integer' },
-        description: '优先年份列表，缺省用配置（近5年）',
+        description: '覆盖 recent 池年份（一般不需要）',
       },
-      limit: { type: 'integer', description: '每源检索上限（默认 20）' },
+      limit: { type: 'integer', description: '每源每查询上限（默认用配置）' },
       pushId: { type: 'integer', description: '复用已开始的推送号；缺省自动新建推送' },
     },
     output: {
@@ -134,7 +153,8 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         additionalProperties: false,
         properties: {
           pushId: { type: 'integer', required: true },
-          topic: { type: 'string', required: true },
+          topicId: { type: 'string', required: true },
+          topicDisplayName: { type: 'string', required: true },
           stage: { type: 'integer', required: true },
           stageLabel: { type: 'string', required: true },
           stageScope: { type: 'string', required: true },
@@ -142,6 +162,25 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           stageDownweightKeywords: { type: 'array', items: { type: 'string' }, required: true },
           stageExcludeKeywords: { type: 'array', items: { type: 'string' }, required: true },
           stageRelevanceThreshold: { type: 'number', required: true },
+          queriesGenerated: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                text: { type: 'string', required: true },
+                kind: { type: 'string', required: true },
+                pool: { type: 'string', required: true },
+              },
+            },
+          },
+          rawCount: { type: 'integer', required: true },
+          dedupedCount: { type: 'integer', required: true },
+          recentCount: { type: 'integer', required: true },
+          landmarkCount: { type: 'integer', required: true },
+          negativeDropped: { type: 'integer', required: true },
+          offTopicDropped: { type: 'integer', required: true },
           total: { type: 'integer', required: true },
           candidates: {
             type: 'array',
@@ -161,6 +200,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 citations: { type: 'integer' },
                 abstract: { type: 'string' },
                 isSeen: { type: 'boolean', required: true },
+                candidatePool: { type: 'string', required: true, enum: ['recent', 'landmark'] },
                 fulltextAvailable: { type: 'boolean', required: true },
                 recencyScore: { type: 'number', required: true },
                 impactScore: { type: 'number', required: true },
@@ -170,6 +210,19 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 stageExcluded: { type: 'boolean', required: true },
                 matchedPreferred: { type: 'array', items: { type: 'string' }, required: true },
                 matchedDownweight: { type: 'array', items: { type: 'string' }, required: true },
+                retrieval: {
+                  type: 'array',
+                  required: true,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      source: { type: 'string', required: true },
+                      query: { type: 'string', required: true },
+                      score: { type: 'number' },
+                    },
+                  },
+                },
                 rankHint: { type: 'number', required: true },
               },
             },
@@ -179,57 +232,97 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       render: (_args, value: SourcesOutput) => [
         {
           type: 'text',
-          text: `push #${value.pushId} 主题「${value.topic}」阶段「${value.stageLabel}」（阈值 ${value.stageRelevanceThreshold}）：共 ${value.total} 篇候选，预排序 Top ${value.candidates.length}：\n` +
+          text: `push #${value.pushId} 主题「${value.topicDisplayName}」阶段「${value.stageLabel}」：raw ${value.rawCount} → 去重 ${value.dedupedCount}（recent ${value.recentCount} / landmark ${value.landmarkCount}，负向过滤 ${value.negativeDropped}，离题 ${value.offTopicDropped}），Top ${value.candidates.length}：\n` +
             value.candidates
               .map(
                 (c, i) =>
-                  `${i + 1}. [${c.isSeen ? '已读' : '新'}${c.stageExcluded ? '✗阶段排除' : ''}] ${c.title} (${c.year ?? '?'}, 引用 ${c.citations ?? '?'}, 预排序 ${c.preRankScore.toFixed(3)}, 阶段契合 ${c.stageRelevanceHint.toFixed(2)}, 全文 ${c.fulltextAvailable})`,
+                  `${i + 1}. [${c.candidatePool === 'landmark' ? 'L' : 'R'}${c.isSeen ? '·已读' : ''}] ${c.title} (${c.year ?? '?'}, 引用 ${c.citations ?? '?'}, 预排序 ${c.preRankScore.toFixed(3)}, 阶段契合 ${c.stageRelevanceHint.toFixed(2)})`,
               )
               .join('\n'),
         },
       ],
     },
-    async execute(args: SourcesInput) {
+    async execute(args: SourcesInput): Promise<SourcesOutput> {
       const rt = getRt()
       const { db, cfg } = rt
-      const topic = args.topic ?? cfg.topics[0] ?? '足式机器人控制'
+      const topic: TopicDef = resolveTopic(cfg.topics, args.topic)
       const years = args.years && args.years.length > 0 ? args.years : cfg.yearsPrefer
-      const limit = args.limit ?? 20
 
       let pushId = args.pushId
       if (pushId === undefined) {
-        const stage = ensureStage(db, topic, cfg.targetPapersPerStage)
-        pushId = startPush(db, topic, stage.current).pushId
+        const stage = ensureStage(db, topic.id, cfg.targetPapersPerStage)
+        pushId = startPush(db, topic.id, stage.current).pushId
       }
-      const stage = getStage(db, topic)
+      const stage = getStage(db, topic.id)
       const def = stageDef(cfg.stageOrder, stage.current)
 
-      const papers = await rt.registry.search({ topic, years, limit })
-      const seen = seenPaperIds(db, topic)
+      // --- planner: queries per pool ---
+      const recentQueries = planQueries(topic, def, 'recent')
+      const landmarkQueries = planQueries(topic, def, 'landmark')
+
+      // --- retrieve both pools independently ---
+      const recent = await rt.registry.searchPool(cfg, recentQueries, def, 'recent')
+      const landmark = await rt.registry.searchPool(cfg, landmarkQueries, def, 'landmark')
+
+      // --- negative terms filter (before merge) ---
+      const negRecent = applyNegativeFilter(recent.papers, topic.negativeTerms)
+      const negLandmark = applyNegativeFilter(landmark.papers, topic.negativeTerms)
+      const recentPapers = negRecent.kept as PaperRef[]
+      const landmarkPapers = negLandmark.kept as PaperRef[]
+      const negativeDropped = negRecent.dropped + negLandmark.dropped
+
+      // --- merge with pool tagging (recent wins the label) ---
+      const merged = mergeWithLabels([
+        ...recentPapers.map((paper) => ({ paper, pool: 'recent' as const })),
+        ...landmarkPapers.map((paper) => ({ paper, pool: 'landmark' as const })),
+      ])
+
+      const seen = seenPaperIds(db, topic.id)
       const now = currentYear()
+      let offTopicDropped = 0
 
       const insertCandidate = db.prepare(
         `INSERT INTO candidates
            (push_id, paper_id, rank_hint, picked, recency_score, impact_score,
-            topic_similarity, fulltext_available, stage_relevance_hint, is_seen)
-         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+            topic_similarity, fulltext_available, stage_relevance_hint, candidate_pool, is_seen)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(push_id, paper_id) DO UPDATE SET
            recency_score=excluded.recency_score, impact_score=excluded.impact_score,
            topic_similarity=excluded.topic_similarity,
            fulltext_available=excluded.fulltext_available,
-           stage_relevance_hint=excluded.stage_relevance_hint, is_seen=excluded.is_seen`,
+           stage_relevance_hint=excluded.stage_relevance_hint,
+           candidate_pool=excluded.candidate_pool, is_seen=excluded.is_seen`,
       )
+      const insertRetrieval = db.prepare(
+        `INSERT INTO retrievals
+           (push_id, paper_id, generated_query, query_language, source_adapter,
+            retrieval_score, candidate_pool, retrieved_at)
+         VALUES (?, ?, ?, 'en', ?, ?, ?, datetime('now'))`,
+      )
+
+      // provenance bookkeeping: paperId (pre-merge canonical) → provenance rows
+      const provByPaper = new Map<string, RetrievalProvenance[]>()
+      for (const prov of [...recent.provenance, ...landmark.provenance]) {
+        const list = provByPaper.get(prov.paperId) ?? []
+        list.push(prov)
+        provByPaper.set(prov.paperId, list)
+      }
 
       const rows: Array<{
         paper: PaperRef
+        pool: 'recent' | 'landmark'
         pre: PreRankResult
         sr: StageRelevanceResult
         isSeen: boolean
+        prov: RetrievalProvenance[]
       }> = []
-      for (const paper of papers) {
+      for (const { paper, pool } of merged) {
         const id = canonicalId(paper)
         upsertPaper(db, paperToRow(paper))
         const isSeen = seen.has(id)
+        const sr = def
+          ? stageRelevanceHint(`${paper.title} ${paper.abstract ?? ''}`, def)
+          : { score: 0.5, excluded: false, matchedPreferred: [], matchedDownweight: [] }
         const pre = preRank(
           {
             title: paper.title,
@@ -237,20 +330,38 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             year: paper.year,
             citations: paper.citations,
             fulltextAvailable: quickPdfAvailability(paper),
+            stageRelevance: sr.score,
           },
           cfg,
           now,
+          pool,
         )
-        const sr = def
-          ? stageRelevanceHint(`${paper.title} ${paper.abstract ?? ''}`, def)
-          : { score: 0.5, excluded: false, matchedPreferred: [], matchedDownweight: [] }
-        rows.push({ paper, pre, sr, isSeen })
+        const prov = provByPaper.get(id) ?? []
+        if (pre.topicSimilarity < cfg.retrieval.minTopicSimilarity) {
+          offTopicDropped += 1
+          continue
+        }
+        rows.push({ paper, pool, pre, sr, isSeen, prov })
+        if (prov.length > 0) {
+          for (const p of prov) {
+            insertRetrieval.run(pushId, id, p.query, p.source, p.retrievalScore, pool)
+          }
+        } else {
+          insertRetrieval.run(
+            pushId,
+            id,
+            recentQueries[0]?.text ?? '',
+            'unknown',
+            null,
+            pool,
+          )
+        }
       }
       rows.sort((a, b) => b.pre.score - a.pre.score)
 
       const topN = rows.slice(0, Math.max(1, cfg.preRankTopN))
       for (let i = 0; i < topN.length; i += 1) {
-        const { paper, pre, sr, isSeen } = topN[i]!
+        const { paper, pool, pre, sr, isSeen } = topN[i]!
         insertCandidate.run(
           pushId,
           canonicalId(paper),
@@ -260,13 +371,15 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           pre.topicSimilarity,
           pre.fulltextAvailable ? 1 : 0,
           sr.score,
+          pool,
           isSeen ? 1 : 0,
         )
       }
 
       return {
         pushId,
-        topic,
+        topicId: topic.id,
+        topicDisplayName: topic.displayName,
         stage: stage.current,
         stageLabel: stageLabel(cfg.stageOrder, stage.current),
         stageScope: def?.scope ?? '',
@@ -274,8 +387,19 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         stageDownweightKeywords: def?.downweightKeywords ?? [],
         stageExcludeKeywords: def?.excludeKeywords ?? [],
         stageRelevanceThreshold: cfg.stageRelevanceThreshold,
+        queriesGenerated: [...recentQueries, ...landmarkQueries].map((q) => ({
+          text: q.text,
+          kind: q.kind,
+          pool: q.pool,
+        })),
+        rawCount: recent.rawCount + landmark.rawCount,
+        dedupedCount: merged.length,
+        recentCount: merged.filter((m) => m.pool === 'recent').length,
+        landmarkCount: merged.filter((m) => m.pool === 'landmark').length,
+        negativeDropped,
+        offTopicDropped,
         total: rows.length,
-        candidates: topN.map(({ paper, pre, sr, isSeen }, i) =>
+        candidates: topN.map(({ paper, pool, pre, sr, isSeen, prov }, i) =>
           clean({
             paperId: canonicalId(paper),
             title: paper.title,
@@ -288,6 +412,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             citations: paper.citations,
             abstract: paper.abstract,
             isSeen,
+            candidatePool: pool,
             fulltextAvailable: pre.fulltextAvailable,
             recencyScore: pre.recencyScore,
             impactScore: pre.impactScore,
@@ -297,6 +422,13 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             stageExcluded: sr.excluded,
             matchedPreferred: sr.matchedPreferred,
             matchedDownweight: sr.matchedDownweight,
+            retrieval: prov.map((p) =>
+              clean({
+                source: p.source,
+                query: p.query,
+                score: p.retrievalScore ?? undefined,
+              }),
+            ),
             rankHint: i + 1,
           }),
         ),

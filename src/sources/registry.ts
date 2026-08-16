@@ -1,18 +1,137 @@
 /**
- * Adapter registry: registers adapters, fans out searches in parallel,
- * merges and de-duplicates results, and exposes per-paper PDF candidates.
- * Business logic never touches concrete APIs directly.
+ * Adapter registry: fans out planned queries to retrieval adapters
+ * (arxiv + openalex; crossref is metadata-completion only), merges and
+ * de-duplicates hits (DOI → arXiv id → OpenAlex id → normalized title,
+ * with title-level cross-identifier merging), and collects per-hit
+ * retrieval provenance. Business logic never touches concrete APIs.
  */
-import type { PaperRef, PdfCandidate, SearchParams, SourceAdapter } from './types.js'
+import type {
+  PaperRef,
+  PdfCandidate,
+  PlannedQuery,
+  SearchHit,
+  SourceAdapter,
+} from './types.js'
 import { canonicalId, normalizeTitle } from './types.js'
 import { ArxivAdapter } from './arxiv.js'
 import { OpenAlexAdapter } from './openalex.js'
 import { CrossrefAdapter } from './crossref.js'
+import { landmarkEligibility } from '../lib/planner.js'
+import { stageRelevanceHint } from '../lib/ranking.js'
+import type { LiteratureConfig, StageDef } from '../config.js'
 
 export interface RegistryOptions {
   fetchImpl?: typeof fetch
   timeoutMs?: number
   mailto?: string
+}
+
+export interface RetrievalProvenance {
+  paperId: string
+  query: string
+  language: 'en'
+  source: string
+  retrievalScore: number | null
+  pool: 'recent' | 'landmark'
+  retrievedAt: string
+}
+
+export interface PoolSearchResult {
+  papers: PaperRef[]
+  provenance: RetrievalProvenance[]
+  /** how many raw hits (before dedup) each source produced */
+  rawCount: number
+}
+
+function rankPaper(p: PaperRef): number {
+  return (p.doi ? 3 : 0) + (p.citations !== undefined ? 2 : 0) + (p.abstract ? 1 : 0)
+}
+
+/** Strong dedup key: DOI → arXiv id → OpenAlex id. */
+export function dedupKeyOf(p: PaperRef): string | undefined {
+  if (p.doi) return `doi:${p.doi.toLowerCase()}`
+  if (p.arxivId) return `arxiv:${p.arxivId.toLowerCase()}`
+  if (p.openalexId) return `openalex:${p.openalexId.toLowerCase()}`
+  return undefined
+}
+
+/** Fill missing fields from another record (identifier/venue/year/citations…). */
+function combine(a: PaperRef, b: PaperRef): PaperRef {
+  const out: PaperRef = { ...a }
+  if (!out.doi && b.doi) out.doi = b.doi
+  if (!out.arxivId && b.arxivId) out.arxivId = b.arxivId
+  if (!out.openalexId && b.openalexId) out.openalexId = b.openalexId
+  if (!out.venue && b.venue) out.venue = b.venue
+  if (out.year === undefined && b.year !== undefined) out.year = b.year
+  if (out.citations === undefined && b.citations !== undefined) out.citations = b.citations
+  if (!out.abstract && b.abstract) out.abstract = b.abstract
+  if (!out.url && b.url) out.url = b.url
+  if (out.authors.length === 0 && b.authors.length > 0) out.authors = b.authors
+  return out
+}
+
+/**
+ * Two-pass dedup:
+ * 1. strong identifiers (doi/arxiv/openalex);
+ * 2. normalized title — records with the same title but different strong
+ *    identifiers are merged (identifiers combined, richer metadata wins).
+ */
+export function mergePapers(papers: PaperRef[]): PaperRef[] {
+  const byId = new Map<string, PaperRef>()
+  for (const p of papers) {
+    const k = dedupKeyOf(p)
+    if (!k) continue
+    const ex = byId.get(k)
+    if (!ex || rankPaper(p) > rankPaper(ex)) byId.set(k, p)
+  }
+  const survivors = [...byId.values(), ...papers.filter((p) => !dedupKeyOf(p))]
+  const byTitle = new Map<string, PaperRef[]>()
+  for (const p of survivors) {
+    const t = normalizeTitle(p.title)
+    const list = byTitle.get(t) ?? []
+    list.push(p)
+    byTitle.set(t, list)
+  }
+  const out: PaperRef[] = []
+  for (const list of byTitle.values()) {
+    let rep = list[0]!
+    for (const other of list.slice(1)) {
+      rep = rankPaper(other) > rankPaper(rep) ? other : rep
+      rep = combine(rep, other)
+    }
+    if (rep.id !== canonicalId(rep)) rep = { ...rep, id: canonicalId(rep) }
+    out.push(rep)
+  }
+  return out
+}
+
+/** Whether two records refer to the same paper (identifier or title match). */
+export function samePaper(a: PaperRef, b: PaperRef): boolean {
+  const ka = dedupKeyOf(a)
+  const kb = dedupKeyOf(b)
+  if (ka && kb && ka === kb) return true
+  return normalizeTitle(a.title) === normalizeTitle(b.title)
+}
+
+/**
+ * Merge entries carrying pool labels; the 'recent' label wins when a paper
+ * appears in both pools.
+ */
+export function mergeWithLabels(
+  entries: Array<{ paper: PaperRef; pool: 'recent' | 'landmark' }>,
+): Array<{ paper: PaperRef; pool: 'recent' | 'landmark' }> {
+  const merged = mergePapers(entries.map((e) => e.paper))
+  const out: Array<{ paper: PaperRef; pool: 'recent' | 'landmark' }> = []
+  for (const m of merged) {
+    let pool: 'recent' | 'landmark' = 'landmark'
+    for (const e of entries) {
+      if (samePaper(m, e.paper)) {
+        if (e.pool === 'recent') pool = 'recent'
+      }
+    }
+    out.push({ paper: m, pool })
+  }
+  return out
 }
 
 export class SourceRegistry {
@@ -28,34 +147,92 @@ export class SourceRegistry {
     return this.adapters.map((a) => a.name)
   }
 
-  /**
-   * Search all adapters in parallel, merge by canonical id and normalized
-   * title. Richer records (with doi/citations/oa) win over thinner ones.
-   */
-  async search(params: SearchParams): Promise<PaperRef[]> {
-    const results = await Promise.all(
-      this.adapters.map((a) =>
-        a.search(params).catch((err: unknown) => {
-          // one adapter failing must not kill the whole search
-          console.warn(`[dsh-literature] adapter ${a.name} search failed: ${String(err)}`)
-          return [] as PaperRef[]
-        }),
-      ),
-    )
-    const byId = new Map<string, PaperRef>()
-    const rank = (p: PaperRef): number =>
-      (p.doi ? 3 : 0) + (p.citations !== undefined ? 2 : 0) + (p.abstract ? 1 : 0)
+  private retrievalAdapters(): SourceAdapter[] {
+    // crossref search is not a relevance signal — exclude from candidate retrieval
+    return this.adapters.filter((a) => a.name !== 'crossref')
+  }
 
-    for (const list of results) {
-      for (const paper of list) {
-        const id = canonicalId(paper)
-        const existing = byId.get(id)
-        if (!existing || rank(paper) > rank(existing)) {
-          byId.set(id, paper)
+  /**
+   * Search one pool (recent | landmark) with the planned queries across all
+   * retrieval adapters; returns deduped papers + full provenance.
+   */
+  async searchPool(
+    cfg: LiteratureConfig,
+    queries: PlannedQuery[],
+    stage: StageDef | undefined,
+    pool: 'recent' | 'landmark',
+  ): Promise<PoolSearchResult> {
+    const params = {
+      queries,
+      pool,
+      recentYears: cfg.retrieval.recentYears,
+      limitPerQuery: cfg.retrieval.perQueryLimit,
+    }
+    const allHits: SearchHit[] = []
+    let raw = 0
+
+    for (const adapter of this.retrievalAdapters()) {
+      for (const q of queries) {
+        let hits: SearchHit[] = []
+        try {
+          hits = await adapter.search({ ...params, queries: [q] })
+        } catch (err) {
+          console.warn(`[dsh-literature] ${adapter.name} search failed: ${String(err)}`)
+          continue
         }
+        allHits.push(...hits.map((h) => ({ ...h, source: adapter.name })))
+        raw += hits.length
       }
     }
-    return [...byId.values()]
+
+    const papers = mergePapers(allHits.map((h) => h.paper))
+    const provenance: RetrievalProvenance[] = []
+    for (const hit of allHits) {
+      const merged = papers.find((p) => samePaper(p, hit.paper))
+      if (!merged) continue
+      provenance.push({
+        paperId: canonicalId(merged),
+        query: hit.query,
+        language: 'en',
+        source: hit.source ?? 'unknown',
+        retrievalScore: hit.retrievalScore ?? null,
+        pool,
+        retrievedAt: new Date().toISOString(),
+      })
+    }
+
+    let result = papers
+    if (pool === 'landmark' && stage) {
+      // landmark eligibility: stage relevance + impact + venue, capped
+      result = papers
+        .map((p) => {
+          const sr = stageRelevanceHint(`${p.title} ${p.abstract ?? ''}`, stage)
+          return {
+            p,
+            el: landmarkEligibility(
+              {
+                year: p.year,
+                citations: p.citations,
+                venue: p.venue,
+                stageHint: sr.score,
+                stageMatched: sr.matchedPreferred.length,
+              },
+              cfg,
+            ),
+          }
+        })
+        .filter((x) => x.el.eligible)
+        .sort((a, b) => b.el.score - a.el.score)
+        .slice(0, cfg.retrieval.landmarkMaxCandidates)
+        .map((x) => x.p)
+      const allowed = new Set(result.map((p) => canonicalId(p)))
+      // keep provenance only for admitted landmark papers
+      for (let i = provenance.length - 1; i >= 0; i -= 1) {
+        if (!allowed.has(provenance[i]!.paperId)) provenance.splice(i, 1)
+      }
+    }
+
+    return { papers: result, provenance, rawCount: raw }
   }
 
   /** Enrich a paper with any adapter that can (citations/venue/OA location). */
@@ -87,7 +264,7 @@ export class SourceRegistry {
   }
 }
 
-/** Build the V0.1 registry with the three shipped adapters. */
+/** Build the V0.2 registry with the three shipped adapters. */
 export function createRegistry(opts: RegistryOptions = {}): SourceRegistry {
   const registry = new SourceRegistry(opts)
   registry.register(new ArxivAdapter(opts.fetchImpl, opts.timeoutMs))

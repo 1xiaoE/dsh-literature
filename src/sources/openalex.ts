@@ -1,8 +1,12 @@
 /**
- * OpenAlex adapter: metadata, citation counts, venue and OA locations.
+ * OpenAlex adapter: metadata, citation counts, venue, OA locations.
+ * Query style: semantic `search=` (official capability) with
+ * `filter=title_and_abstract.search:"q"` style constraints where useful;
+ * multiple query results are merged by the registry. Captures the
+ * source-provided `relevance_score` for retrieval provenance.
  * API: https://api.openalex.org/works
  */
-import type { PaperRef, PdfCandidate, SearchParams, SourceAdapter } from './types.js'
+import type { PaperRef, PdfCandidate, SearchHit, SearchParams, SourceAdapter } from './types.js'
 
 const API = 'https://api.openalex.org/works'
 
@@ -13,6 +17,7 @@ interface OpenAlexWork {
   display_name?: string
   publication_year?: number
   cited_by_count?: number
+  relevance_score?: number
   authorships?: Array<{ author?: { display_name?: string } }>
   primary_location?: {
     source?: { display_name?: string }
@@ -56,13 +61,6 @@ export class OpenAlexAdapter implements SourceAdapter {
     }
   }
 
-  async search(params: SearchParams): Promise<PaperRef[]> {
-    const years = params.years.join('|')
-    const url = `${API}?search=${encodeURIComponent(params.topic)}&filter=publication_year:${years}&per-page=${params.limit}&sort=cited_by_count:desc`
-    const data = (await this.getJson(url)) as { results?: OpenAlexWork[] }
-    return (data.results ?? []).map((w) => this.toRef(w)).filter((p): p is PaperRef => p !== null)
-  }
-
   private toRef(w: OpenAlexWork): PaperRef | null {
     const title = w.title ?? w.display_name
     if (!title) return null
@@ -82,6 +80,40 @@ export class OpenAlexAdapter implements SourceAdapter {
       citations: w.cited_by_count,
       metadataSource: this.name,
     }
+  }
+
+  /** Build one OpenAlex URL for a planned query. */
+  private buildUrl(query: string, pool: 'recent' | 'landmark', recentYears: number, limit: number): string {
+    const q = encodeURIComponent(`"${query}"`)
+    let filter = ''
+    if (pool === 'recent') {
+      const start = new Date().getUTCFullYear() - recentYears + 1
+      const end = new Date().getUTCFullYear()
+      filter = `&filter=publication_year:${start}-${end}`
+    }
+    // semantic search (official); landmark sorts by citation impact
+    const sort = pool === 'landmark' ? '&sort=cited_by_count:desc' : ''
+    return `${API}?search=${q}${filter}${sort}&per-page=${limit}`
+  }
+
+  async search(params: SearchParams): Promise<SearchHit[]> {
+    const hits: SearchHit[] = []
+    for (const q of params.queries) {
+      const url = this.buildUrl(q.text, params.pool, params.recentYears, params.limitPerQuery)
+      let data: { results?: OpenAlexWork[] } | undefined
+      try {
+        data = (await this.getJson(url)) as { results?: OpenAlexWork[] }
+      } catch (err) {
+        console.warn(`[dsh-literature] openalex query "${q.text}" failed: ${String(err)}`)
+        continue
+      }
+      for (const w of data?.results ?? []) {
+        const paper = this.toRef(w)
+        if (!paper) continue
+        hits.push({ paper, query: q.text, retrievalScore: w.relevance_score })
+      }
+    }
+    return hits
   }
 
   async expand(paper: PaperRef): Promise<Partial<PaperRef> | null> {
@@ -106,14 +138,12 @@ export class OpenAlexAdapter implements SourceAdapter {
   async pdfCandidates(paper: PaperRef): Promise<PdfCandidate[]> {
     const out: PdfCandidate[] = []
     if (!paper.url) {
-      // try expand for OA location
       const ext = await this.expand(paper)
       if (ext?.url) {
         out.push({ url: ext.url, license: 'oa', source: this.name })
       }
       return out
     }
-    // heuristic: openalex urls that are pdfs or landing pages are OA
     out.push({ url: paper.url, license: 'oa', source: this.name })
     return out
   }

@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export type Db = DatabaseSync
 
@@ -124,6 +124,18 @@ CREATE TABLE IF NOT EXISTS fulltext_chunks (
   PRIMARY KEY (paper_id, seq)
 );
 
+CREATE TABLE IF NOT EXISTS retrievals (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id         INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id        TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  generated_query TEXT NOT NULL,
+  query_language  TEXT NOT NULL DEFAULT 'en',
+  source_adapter  TEXT NOT NULL,
+  retrieval_score REAL,
+  candidate_pool  TEXT NOT NULL CHECK (candidate_pool IN ('recent','landmark')),
+  retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS stages (
   topic           TEXT PRIMARY KEY,
   current         INTEGER NOT NULL DEFAULT 1,
@@ -136,6 +148,22 @@ CREATE TABLE IF NOT EXISTS stages (
     // stage relevance: deterministic hint (program) + agent-assigned score
     db.exec('ALTER TABLE candidates ADD COLUMN stage_relevance_hint REAL;')
     db.exec('ALTER TABLE candidates ADD COLUMN stage_relevance_score REAL;')
+  }
+  if (version < 3) {
+    db.exec("ALTER TABLE candidates ADD COLUMN candidate_pool TEXT NOT NULL DEFAULT 'recent';")
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS retrievals (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        push_id         INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+        paper_id        TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+        generated_query TEXT NOT NULL,
+        query_language  TEXT NOT NULL DEFAULT 'en',
+        source_adapter  TEXT NOT NULL,
+        retrieval_score REAL,
+        candidate_pool  TEXT NOT NULL CHECK (candidate_pool IN ('recent','landmark')),
+        retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );`,
+    )
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

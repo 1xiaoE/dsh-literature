@@ -83,7 +83,23 @@ OS cron/systemd ──► dsh-literature-push.mjs
 - 若 fulltext 状态为 `FULLTEXT_UNAVAILABLE`，流程必须停止并如实记录，禁止根据摘要伪装全文精读。
 - 全文**绝不一次性**进入上下文：`fulltext_index` 给章节索引，`fulltext_read` 按章节/范围返回有界文本。
 
-## 3. SourceAdapter 统一接口（调整 2）
+## 3. Literature Query Planner（V0.2）
+
+- **Topic normalization**：`TopicDef{id, displayName, canonicalQueries, secondaryQueries, negativeTerms}`；中文显示名仅用于追踪，学术检索全部使用英文 canonical/secondary 查询。
+- **Stage-aware query expansion**：查询 = topic 查询 ∪ 当前 stage 的 `searchQueries`；后期 stage 关键词不会污染早期 stage（按构造保证）。
+- **Source-specific query style**：
+  - OpenAlex：semantic `search=`（官方能力）+ 年份 filter（recent）/ `sort=cited_by_count:desc`（landmark），捕获 `relevance_score`；
+  - arXiv：`ti:"q" OR abs:"q"` + 机器人相关 category（cs.RO/cs.LG/cs.AI/eess.SY/math.OC）辅助约束，recent 加 submittedDate 窗口，**不用**宽泛 `all:`；
+  - Crossref：仅 bibliographic/DOI/venue 元数据补全，其搜索结果不作为领域相关性真值（search 返回空）。
+- **RecentPool / LandmarkPool 分离**（禁止"移除年份过滤"式取巧）：
+  - RecentPool：`recent_years` 窗口；
+  - LandmarkPool：不限年份，但须通过 `landmarkEligibility`（stage 契合 ≥1 个 preferred 概念 + hint ≥ 阈值 + impact + venue 加分），并按 `landmarkMaxCandidates` 上限截断；高引本身不构成 landmark。
+  - 候选带 `candidate_pool = recent | landmark`，合并时 recent 优先标签。
+- **候选规模**：多查询合并 raw 30~60 → 去重 → 负向词过滤 + 离题过滤（`minTopicSimilarity`）→ 确定性预排序 Top 15 → agent 语义排序（≥10 篇评分）→ Top 1。
+- **Retrieval provenance**：`retrievals` 表保存 generated_query / query_language / source_adapter / retrieval_score / candidate_pool / retrieved_at，可审计"为什么检索到这篇"。
+- 确定性预排序权重含 `stageRelevance`（默认 0.3）；stage-excluded 论文预排序分 ×0.6 惩罚。
+
+## 3b. SourceAdapter 统一接口（调整 2）
 
 ```ts
 interface SourceAdapter {
@@ -101,7 +117,16 @@ interface SourceAdapter {
 - **Semantic Scholar 暂缓**（留接口，不实现）。
 - `registry.ts` 负责注册、并行检索、按 `doi`/`arxiv_id`/`title` 规范化去重合并；业务逻辑不得散落具体 API 调用。
 
-## 4. 两阶段 Ranking（调整 3）
+## 4. 两阶段 Ranking（调整 3）与 Stage Relevance（约束）
+
+- 每个阶段带 `StageDef`：`label` / `scope` / `preferredKeywords` / `downweightKeywords` / `excludeKeywords`。
+- 程序侧计算确定性 `stage_relevance_hint`（关键词重叠，exclude 命中即 0 并标记 `stage_excluded`），随候选返回并落库 `candidates.stage_relevance_hint`。
+- agent 语义排序必须给出 `stage_relevance_score`（0~1）并写入 `candidates.stage_relevance_score`，rationale 说明为何适合当前阶段。
+- **门控**：`stage_relevance_score < threshold`（默认 0.6）或缺失 → `literature_record` 拒绝 completed；即使 overall impact 很高也不可选为 Top 1。
+- **阶段推进只统计真正符合当前阶段的成功论文**（`stage_matched`）；duplicate 与不匹配论文均不计入 `papers_in_stage`。
+- `targetPapersPerStage` 默认 **3**。
+
+
 
 **Stage A — deterministic pre-ranking（程序侧，无 LLM）**
 - 输入：全部候选（已去重）
@@ -155,7 +180,12 @@ interface SourceAdapter {
 - **headless 运行**：`dsh --profile headless --patch ~/dsh-literature/cordis.patch.yml "<task>"`（官方 runner：单次 task → 等静默 → 退出，exit 0/1）。bin 包装此调用，供 OS cron。
 - **不用 ctx.jobs 包 push 流程**；不改 agent-loop、不动 SessionEventMap、不碰 harness core。
 
-## 9. V0.1 Acceptance Criteria
+## 9. 报告存储（约束 5）
+
+- canonical：`~/.local/share/dsh-literature/reports/<阶段>/<作者_年份_关键词>.md`（`libraryRoot` 为空时默认）。
+- 不为写 `~/Desktop/文献阅读` 放宽 Harness sandbox；Desktop 导出由外层脚本或 Zotero 同步完成。
+
+## 10. V0.1 Acceptance Criteria
 
 **必须满足**
 1. `pnpm build` / `tsc --noEmit` 通过；插件可挂载进 web profile，卸载无残留。
@@ -164,7 +194,7 @@ interface SourceAdapter {
 4. FULLTEXT_UNAVAILABLE 分支：流程停止、状态记录、无虚假精读（有测试）。
 5. PDF 多源 fallback：404/403/空正文回退；全失败记录 attempts（有测试）。
 6. 去重生效：已推论文 `is_seen=1` 排除或明确标记。
-7. SQLite 迁移幂等；运行数据全在 `~/.local/share/dsh-literature/`，`git status` 干净。
+7. SQLite 迁移幂等（v2）；运行数据全在 `~/.local/share/dsh-literature/`，`git status` 干净。
 8. headless CLI 无 GUI 可用（OS cron 可调）。
 
 **非目标（V0.1）**：GUI cron、Semantic Scholar、Zotero、PDF 视觉理解。

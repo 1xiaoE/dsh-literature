@@ -1,11 +1,14 @@
 /**
- * arXiv adapter: preprint metadata + open PDF (https://arxiv.org/pdf/<id>).
- * Uses the public arXiv API (Atom XML) and its export mirror.
+ * arXiv adapter: preprint metadata + open PDF.
+ * Query style: field-combined `ti:"q" OR abs:"q"` plus robotics-related
+ * categories as an auxiliary constraint (cs.RO / cs.LG / cs.AI / eess.SY /
+ * math.OC); broad `all:` queries are NOT used. Recent pool constrains
+ * submittedDate; landmark pool is year-unconstrained.
  */
-import type { PaperRef, PdfCandidate, SearchParams, SourceAdapter } from './types.js'
-import { normalizeTitle } from './types.js'
+import type { PaperRef, PdfCandidate, SearchHit, SearchParams, SourceAdapter } from './types.js'
 
 const API = 'https://export.arxiv.org/api/query'
+const CATS = 'cat:cs.RO OR cat:cs.LG OR cat:cs.AI OR cat:eess.SY OR cat:math.OC'
 
 interface RawEntry {
   id: string
@@ -67,41 +70,72 @@ export class ArxivAdapter implements SourceAdapter {
     private readonly timeoutMs = 30000,
   ) {}
 
-  private async getJson(url: string): Promise<Response> {
+  private async getText(url: string): Promise<string> {
     const ctrl = new AbortController()
     const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
     try {
-      const res = await this.fetchImpl(url, { signal: ctrl.signal, headers: { accept: 'application/atom+xml' } })
+      const res = await this.fetchImpl(url, {
+        signal: ctrl.signal,
+        headers: { accept: 'application/atom+xml' },
+      })
       if (!res.ok) throw new Error(`arXiv API HTTP ${res.status}`)
-      return res
+      return await res.text()
     } finally {
       clearTimeout(timer)
     }
   }
 
-  async search(params: SearchParams): Promise<PaperRef[]> {
-    const query = `all:"${params.topic.replace(/["\\]/g, ' ')}" AND submittedDate:[${Math.min(...params.years)}0101 TO ${Math.max(...params.years)}1231]`
-    const url = `${API}?search_query=${encodeURIComponent(query)}&start=0&max_results=${params.limit}&sortBy=submittedDate&sortOrder=descending`
-    const res = await this.getJson(url)
-    const xml = await res.text()
-    return parseAtom(xml).map((e) => {
-      const arxivId = arxivIdFromUrl(e.id)
-      const year = Number.parseInt(e.published.slice(0, 4), 10)
-      return {
-        id: `arxiv:${arxivId ?? ''}`,
-        title: e.title.replace(/\s+/g, ' ').trim(),
-        authors: e.authors,
-        year: Number.isFinite(year) ? year : undefined,
-        arxivId,
-        url: `https://arxiv.org/abs/${arxivId}`,
-        abstract: e.summary.replace(/\s+/g, ' ').trim(),
-        metadataSource: this.name,
-      } satisfies PaperRef
-    })
+  private toRef(e: RawEntry): PaperRef {
+    const arxivId = arxivIdFromUrl(e.id)
+    const year = Number.parseInt(e.published.slice(0, 4), 10)
+    return {
+      id: `arxiv:${arxivId ?? ''}`,
+      title: e.title.replace(/\s+/g, ' ').trim(),
+      authors: e.authors,
+      year: Number.isFinite(year) ? year : undefined,
+      arxivId,
+      url: `https://arxiv.org/abs/${arxivId}`,
+      abstract: e.summary.replace(/\s+/g, ' ').trim(),
+      metadataSource: this.name,
+    }
+  }
+
+  /** Build one arXiv search_query for a planned query (title/abstract + cats). */
+  private buildQuery(query: string, pool: 'recent' | 'landmark', recentYears: number): string {
+    const terms = query
+      .split(/\s+/)
+      .map((t) => `"${t.replace(/"/g, '')}"`)
+      .join(' AND ')
+    const fieldQuery = `(ti:${terms} OR abs:${terms})`
+    let dateClause = ''
+    if (pool === 'recent') {
+      const start = `${new Date().getUTCFullYear() - recentYears + 1}0101`
+      const end = `${new Date().getUTCFullYear()}1231`
+      dateClause = ` AND submittedDate:[${start} TO ${end}]`
+    }
+    return `${fieldQuery} AND (${CATS})${dateClause}`
+  }
+
+  async search(params: SearchParams): Promise<SearchHit[]> {
+    const hits: SearchHit[] = []
+    for (const q of params.queries) {
+      const searchQuery = this.buildQuery(q.text, params.pool, params.recentYears)
+      const url = `${API}?search_query=${encodeURIComponent(searchQuery)}&start=0&max_results=${params.limitPerQuery}&sortBy=submittedDate&sortOrder=descending`
+      let xml = ''
+      try {
+        xml = await this.getText(url)
+      } catch (err) {
+        console.warn(`[dsh-literature] arxiv query "${q.text}" failed: ${String(err)}`)
+        continue
+      }
+      for (const e of parseAtom(xml)) {
+        hits.push({ paper: this.toRef(e), query: q.text })
+      }
+    }
+    return hits
   }
 
   async expand(paper: PaperRef): Promise<Partial<PaperRef> | null> {
-    // arXiv metadata is complete at search time; nothing to expand.
     return null
   }
 
@@ -110,6 +144,3 @@ export class ArxivAdapter implements SourceAdapter {
     return [{ url: `https://arxiv.org/pdf/${paper.arxivId}`, license: 'oa', source: this.name }]
   }
 }
-
-/** Keep the dedup helper exported for registry reuse. */
-export { normalizeTitle }

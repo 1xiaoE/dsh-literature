@@ -18,6 +18,7 @@ topic → search → deduplicate → pre-rank(Top 8-12) → agent rank(Top 1) �
 
 - 全文**绝不一次性**进入上下文：`literature_fulltext_index` 返回章节索引，`literature_fulltext_read` 按块读取。
 - 全文不可得时如实记录 `FULLTEXT_UNAVAILABLE`，禁止凭摘要伪装精读。
+- 阶段契合门控：`stage_relevance_score` 低于阈值（默认 0.6）的论文不可选为 Top 1；阶段推进只统计符合当前阶段的论文。
 
 ## 工具
 
@@ -57,9 +58,9 @@ dsh plugin --profile headless add link:/home/eternal/dsh-literature
       config:
         topics: ['足式机器人控制']
         libraryRoot: '~/Desktop/文献阅读'
-        targetPapersPerStage: 2
+        targetPapersPerStage: 3
         preRankTopN: 10
-        ranking: { recency: 0.2, impact: 0.25, topicSimilarity: 0.3, fulltextAvailability: 0.25 }
+        ranking: { recency: 0.15, impact: 0.15, topicSimilarity: 0.2, fulltextAvailability: 0.2, stageRelevance: 0.3 }
         agentRanking: { relevance: 0.4, learningValue: 0.3, representativeness: 0.2, novelty: 0.1 }
 ```
 
@@ -74,6 +75,7 @@ pnpm test        # vitest
 ## 数据
 
 `~/.local/share/dsh-literature/`
+- `reports/` — canonical 精读报告（Desktop 导出由外层脚本/Zotero 处理）
 - `literature.db` — papers / candidates（评分追溯）/ fetch_log / fulltexts+chunks / pushes / stages
 - `pdfs/<sha256>.pdf` — 按内容哈希
 - `cache/` — 检索缓存
@@ -82,6 +84,7 @@ pnpm test        # vitest
 ## 路线图
 
 - [x] V0.1：闭环 + headless CLI + SQLite 溯源
+- [x] V0.2：Literature Query Planner（topic 规范化 / stage 感知查询 / Recent+Landmark 双池 / 检索溯源 / 离题过滤）
 - [ ] GUI 内后台任务（ctx.jobs）与定时面板
 - [ ] Semantic Scholar 适配器
 - [ ] Zotero 同步（Linux/Windows）
