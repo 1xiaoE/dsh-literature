@@ -30,6 +30,7 @@ import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility, ma
 import type { PaperRef, PlannedQuery } from '../sources/types.js'
 import { canonicalId } from '../sources/types.js'
 import { mergeWithLabels, type RetrievalProvenance } from '../sources/registry.js'
+import { inRetryCooldown } from '../fetch/pdf.js'
 
 export interface SourcesInput {
   topic?: string
@@ -88,6 +89,7 @@ export interface SourcesOutput {
     knowledgeGapHint: number
     knowledgeGapGoals: string[]
     priorityGoalMatch: boolean
+    inCooldown: boolean
     retrieval: Array<{ source: string; query: string; score?: number }>
     rankHint: number
   }>
@@ -120,6 +122,7 @@ export function rowToRef(row: PaperRow): PaperRef {
     arxivId: row.arxiv_id ?? undefined,
     openalexId: row.openalex_id ?? undefined,
     url: row.url ?? undefined,
+    oaPdfUrl: row.oa_pdf_url ?? undefined,
     abstract: row.abstract ?? undefined,
     citations: row.citations ?? undefined,
     metadataSource: row.metadata_source,
@@ -137,6 +140,7 @@ function paperToRow(paper: PaperRef): PaperRow {
     arxiv_id: paper.arxivId ?? null,
     openalex_id: paper.openalexId ?? null,
     url: paper.url ?? null,
+    oa_pdf_url: paper.oaPdfUrl ?? null,
     abstract: paper.abstract ?? null,
     citations: paper.citations ?? null,
     bibtex: null,
@@ -144,9 +148,9 @@ function paperToRow(paper: PaperRef): PaperRow {
   }
 }
 
-/** Cheap availability heuristic for pre-ranking; the fetch tool verifies for real. */
+/** Cheap availability heuristic for pre-ranking; only real PDF signals count. */
 function quickPdfAvailability(paper: PaperRef): boolean {
-  return Boolean(paper.arxivId || paper.url)
+  return Boolean(paper.arxivId || paper.oaPdfUrl)
 }
 
 export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
@@ -251,6 +255,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 knowledgeGapHint: { type: 'number', required: true },
                 knowledgeGapGoals: { type: 'array', items: { type: 'string' }, required: true },
                 priorityGoalMatch: { type: 'boolean', required: true },
+                inCooldown: { type: 'boolean', required: true },
                 retrieval: {
                   type: 'array',
                   required: true,
@@ -359,6 +364,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         curriculum: number
         landmarkConf: number
         gapGoals: string[]
+        inCooldown: boolean
         isSeen: boolean
         prov: RetrievalProvenance[]
       }> = []
@@ -390,19 +396,21 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         const priorityGoalMatch = priorityGoal
           ? knowledgeGapHint(text, [priorityGoal]).matched.length > 0
           : false
+        const cooldownUntil = inRetryCooldown(db, id, cfg.fulltext.retryCooldownHours)
+        const fulltextAvailable = quickPdfAvailability(paper) && cooldownUntil === null
         const pre = preRank(
           {
             title: paper.title,
             abstract: paper.abstract,
             year: paper.year,
             citations: paper.citations,
-            fulltextAvailable: quickPdfAvailability(paper),
+            fulltextAvailable,
             stageRelevance: sr.score,
             knowledgeGap: uncoveredGoals.length > 0 ? gap.score / uncoveredGoals.length : 0,
             priorityGoalMatch: priorityGoalMatch ? 1 : 0,
           },
           cfg,
-          now,
+          { topicText: topic.canonicalQueries.join(' '), currentYear: now },
           pool,
         )
         const prov = provByPaper.get(id) ?? []
@@ -410,7 +418,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           offTopicDropped += 1
           continue
         }
-        rows.push({ paper, pool, pre, sr, curriculum: ch.score, landmarkConf: lc, gapGoals: gap.matched, isSeen, prov })
+        rows.push({ paper, pool, pre, sr, curriculum: ch.score, landmarkConf: lc, gapGoals: gap.matched, inCooldown: cooldownUntil !== null, isSeen, prov })
         if (prov.length > 0) {
           for (const p of prov) {
             insertRetrieval.run(pushId, id, p.query, p.source, p.retrievalScore, pool)
@@ -475,7 +483,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         negativeDropped,
         offTopicDropped,
         total: rows.length,
-        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, isSeen, prov }, i) => {
+        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, inCooldown, isSeen, prov }, i) => {
           const pg = def ? firstUncoveredGoal(def, covered) : undefined
           const pgMatch = pg ? knowledgeGapHint(`${paper.title} ${paper.abstract ?? ''}`, [pg]).matched.length > 0 : false
           return clean({
@@ -505,6 +513,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             knowledgeGapHint: uncoveredGoals.length > 0 ? gapGoals.length / uncoveredGoals.length : 0,
             knowledgeGapGoals: gapGoals,
             priorityGoalMatch: pgMatch,
+            inCooldown: inCooldown,
             retrieval: prov.map((p) =>
               clean({
                 source: p.source,

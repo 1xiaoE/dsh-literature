@@ -80,6 +80,7 @@ function seed(rt: LiteratureRuntime, over: Record<string, unknown> = {}): string
     arxiv_id: '2401.001',
     openalex_id: null,
     url: null,
+    oa_pdf_url: null,
     abstract: 'A whole-body control approach with contact force distribution.',
     citations: 10,
     bibtex: null,
@@ -104,7 +105,7 @@ describe('PDF_FALLBACK_SUCCESS', () => {
     const { rt, dir } = setup({}, routeFetch([{ status: 404, body: 'nf' }, { status: 200, body: pdf }]))
     // arxiv candidate (will 404) + openalex url candidate (succeeds); no doi so
     // crossref's pdfCandidates does not consume a stub route
-    seed(rt, { url: 'https://oa.example/paper.pdf', doi: null })
+    seed(rt, { oa_pdf_url: 'https://oa.example/paper.pdf', doi: null })
 
     const fetchTool = defineLiteratureFetchPdf(() => rt)
     const fetchRes = await run(fetchTool, { paperId: 'arxiv:2401.001' })
@@ -406,6 +407,62 @@ describe('fulltext_unavailable trail enforcement (V0.3)', () => {
     expect(row.agent_rank).toBe(2)
     expect(row.preflight_attempt_order).toBe(1)
     expect(row.selection_outcome).toBe('FULLTEXT_UNAVAILABLE')
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('fulltext reads coverage (audit fix)', () => {
+  it('completed without any fulltext_read is rejected; reads are recorded', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-reads-'))
+    const rt = createRuntime(normalizeConfig({ dataDir: dir }), {
+      fetchImpl: (async () => new Response('nope', { status: 403 })) as typeof fetch,
+    })
+    const paperId = seed(rt)
+    ensureStage(rt.db, 'legged_robot_control', 3)
+    const pushId = startPush(rt.db, 'legged_robot_control', 1).pushId
+    rt.db
+      .prepare('INSERT INTO candidates (push_id, paper_id, rank_hint, picked, is_seen) VALUES (?, ?, 1, 0, 0)')
+      .run(pushId, paperId)
+    // pretend the fulltext was indexed (chunks exist)
+    rt.db
+      .prepare("INSERT INTO fulltexts (paper_id, status, parser, char_count, chunk_count) VALUES (?, 'ok', 'pdftotext', 1000, 5)")
+      .run(paperId)
+    const insChunk = rt.db.prepare(
+      'INSERT INTO fulltext_chunks (paper_id, seq, section, char_start, char_end, content) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    for (let i = 0; i < 5; i += 1) insChunk.run(paperId, i, 'chunk', i * 10, i * 10 + 10, 'content ' + i)
+    const recordTool = defineLiteratureRecord(() => rt, () => null)
+    const args = {
+      pushId,
+      status: 'completed' as const,
+      paperId,
+      selection: [{ paperId, agentRank: 1, attemptOrder: 1, outcome: 'SELECTED' as const, reason: 'OA' }],
+      scores: [
+        {
+          paperId,
+          relevance: 0.8,
+          learningValue: 0.7,
+          representativeness: 0.7,
+          novelty: 0.4,
+          stageRelevance: 0.9,
+          curriculumValue: 0.85,
+          rationale: 'ok',
+        },
+      ],
+      knowledgeGoals: ['template_dynamics'],
+    }
+    // no reads yet → rejected
+    await expect(run(recordTool, args)).rejects.toThrow(/尚未通过 literature_fulltext_read/)
+    // record two reads, then completion succeeds and reports readsCount
+    const readTool = defineLiteratureFulltextRead(() => rt)
+    await run(readTool, { paperId, seq: 0, pushId })
+    await run(readTool, { paperId, seq: 1, pushId })
+    const rec = await run(recordTool, args)
+    expect(rec.readsCount).toBe(2)
+    const reads = rt.db
+      .prepare('SELECT seq FROM fulltext_reads WHERE push_id = ? AND paper_id = ? ORDER BY seq')
+      .all(pushId, paperId) as Array<{ seq: number }>
+    expect(reads.map((r) => r.seq)).toEqual([0, 1])
     rmSync(dir, { recursive: true, force: true })
   })
 })

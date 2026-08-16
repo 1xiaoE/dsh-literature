@@ -133,6 +133,8 @@ export interface LiteratureConfig {
     minChars: number
     /** full-text parser command */
     parserCommand: string
+    /** hours a FULLTEXT_UNAVAILABLE outcome stays in retry cooldown */
+    retryCooldownHours: number
   }
   http: {
     /** per-request timeout for source adapters and PDF downloads (ms) */
@@ -224,11 +226,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'virtual model control locomotion'
     ],
     knowledgeGoals: [
-      { id: 'balance_stability', label: 'balance and stability', keywords: ['balance', 'stability', 'push recovery', 'capture point', 'postural', 'equilibrium', 'capture input', 'ankle strategy'] },
-      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'compliance', 'stiffness', 'damping', 'virtual spring', 'compliant', 'virtual model'] },
       { id: 'template_dynamics', label: 'template / simplified dynamics', keywords: ['template model', 'inverted pendulum', 'lipm', 'slip', 'spring loaded', 'centroidal', 'zmp', 'simplified model'] },
-      { id: 'contact_force', label: 'contact / force control', keywords: ['contact force', 'ground reaction', 'grf', 'force control', 'friction cone', 'wrench', 'reaction force'] },
-      { id: 'whole_body', label: 'whole-body locomotion control', keywords: ['whole-body control', 'whole body control', 'whole body dynamics', 'full body control', 'wbc'] },
+      { id: 'balance_stability', label: 'balance and stability', keywords: ['balance', 'stability', 'push recovery', 'capture point', 'postural', 'equilibrium', 'capture input', 'ankle strategy'] },
+      { id: 'gait_representation', label: 'gait representation / walking pattern', keywords: ['gait', 'walking pattern', 'gait generation', 'foot placement', 'step planning', 'phase', 'gait transition'] },
+      { id: 'kinematics_jacobian', label: 'kinematics / jacobian', keywords: ['kinematics', 'jacobian', 'inverse kinematics', 'leg kinematics', 'kinematic model', 'workspace'] },
+      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'compliance', 'stiffness', 'damping', 'virtual spring', 'compliant', 'virtual model'] },
     ],
     landmarkSeeds: [
       {
@@ -247,6 +249,11 @@ export const DEFAULT_STAGES: StageDef[] = [
   {
     label: '动力学/接触控制',
     scope: '全身动力学、接触力分配、WBC、足端力/力矩控制、力位混合、摩擦锥、地面反作用力。',
+    knowledgeGoals: [
+      { id: 'contact_force', label: 'contact / force control', keywords: ['contact force', 'ground reaction', 'grf', 'force control', 'friction cone', 'wrench', 'reaction force'] },
+      { id: 'whole_body', label: 'whole-body locomotion control', keywords: ['whole-body control', 'whole body control', 'whole body dynamics', 'full body control', 'wbc'] },
+    ],
+    landmarkSeeds: [],
     preferredKeywords: [
       'whole-body control', 'contact force', 'force distribution', 'wrench',
       'ground reaction', 'grf', 'inverse dynamics', 'hybrid force', 'friction cone',
@@ -265,11 +272,6 @@ export const DEFAULT_STAGES: StageDef[] = [
       'dynamic biped walking control',
       'force distribution legged robot'
     ],
-    knowledgeGoals: [
-      { id: 'contact_distribution', label: 'contact force distribution', keywords: ['contact force', 'force distribution', 'grf', 'wrench', 'friction cone'] },
-      { id: 'whole_body_dynamics', label: 'whole-body dynamics', keywords: ['whole-body control', 'inverse dynamics', 'full body', 'wbc'] },
-    ],
-    landmarkSeeds: [],
   },
   {
     label: 'MPC',
@@ -457,7 +459,7 @@ export function defaultConfig(): LiteratureConfig {
     retrieval: { ...DEFAULT_RETRIEVAL },
     ranking: { ...DEFAULT_RANKING_WEIGHTS },
     agentRanking: { ...DEFAULT_AGENT_RANKING_WEIGHTS },
-    fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext' },
+    fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext', retryCooldownHours: 72 },
     http: { timeoutMs: 30000, minPdfBytes: 10240, unpaywallEmail: 'dsh-literature@example.org' },
   }
 }
@@ -606,6 +608,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
       maxChunkChars: pickNumber(partial.fulltext, 'maxChunkChars', base.fulltext.maxChunkChars),
       minChars: pickNumber(partial.fulltext, 'minChars', base.fulltext.minChars),
       parserCommand: pickString(partial.fulltext, 'parserCommand', base.fulltext.parserCommand),
+      retryCooldownHours: pickNumber(partial.fulltext, 'retryCooldownHours', base.fulltext.retryCooldownHours),
     }
   }
   if (isRecord(partial.http)) {

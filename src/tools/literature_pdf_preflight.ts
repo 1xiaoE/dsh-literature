@@ -9,6 +9,7 @@ import type { LiteratureRuntime } from '../lib/runtime.js'
 import { getPaper } from '../db.js'
 import { preflightPdf, type PreflightProbe } from '../fetch/pdf.js'
 import { rowToRef } from './literature_sources.js'
+import { inRetryCooldown } from '../fetch/pdf.js'
 
 export interface PreflightInput {
   paperId: string
@@ -92,6 +93,17 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
             alreadySelected: true,
             reason: `push #${args.pushId} 已 SELECTED ${selOther.paper_id}；不得再对更低排名候选执行 preflight`,
           }
+        }
+      }
+      // retry cooldown: FULLTEXT_UNAVAILABLE outcomes within the TTL are not re-probed
+      const cooldown = inRetryCooldown(rt.db, args.paperId, rt.cfg.fulltext.retryCooldownHours)
+      if (cooldown) {
+        return {
+          paperId: args.paperId,
+          available: false,
+          candidates: 0,
+          probes: [],
+          reason: `FULLTEXT_UNAVAILABLE retry cooldown (until ${cooldown})`,
         }
       }
       const row = getPaper(rt.db, args.paperId)

@@ -187,3 +187,25 @@ export async function preflightPdf(
   }
   return { available: false, probes }
 }
+
+/**
+ * Retry cooldown: latest FULLTEXT_UNAVAILABLE outcome for a paper, if it is
+ * within the TTL window, returns the ISO timestamp until which retries are
+ * suppressed; otherwise null.
+ */
+export function inRetryCooldown(db: Db, paperId: string, cooldownHours: number): string | null {
+  if (!cooldownHours || cooldownHours <= 0) return null
+  const row = db
+    .prepare(
+      `SELECT created_at FROM fetch_log
+       WHERE paper_id = ? AND outcome = 'FULLTEXT_UNAVAILABLE'
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get(paperId) as { created_at: string } | undefined
+  if (!row) return null
+  const last = new Date(`${row.created_at.replace(' ', 'T')}Z`).getTime()
+  if (Number.isNaN(last)) return null
+  const until = last + cooldownHours * 3600 * 1000
+  if (Date.now() < until) return new Date(until).toISOString()
+  return null
+}

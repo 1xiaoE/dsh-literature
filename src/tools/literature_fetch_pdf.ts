@@ -8,6 +8,7 @@ import type { LiteratureRuntime } from '../lib/runtime.js'
 import { getPaper } from '../db.js'
 import { fetchPdf, type FetchAttempt } from '../fetch/pdf.js'
 import { rowToRef } from './literature_sources.js'
+import { inRetryCooldown } from '../fetch/pdf.js'
 
 export interface FetchPdfInput {
   paperId: string
@@ -96,6 +97,15 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
             attempts: [],
             reason: `invariant: push #${args.pushId} 已 SELECTED ${selOther.paper_id}；禁止对更低排名候选执行下载`,
           }
+        }
+      }
+      const cooldown = inRetryCooldown(rt.db, args.paperId, rt.cfg.fulltext.retryCooldownHours)
+      if (cooldown) {
+        return {
+          paperId: args.paperId,
+          outcome: 'failed',
+          attempts: [],
+          reason: `FULLTEXT_UNAVAILABLE retry cooldown (until ${cooldown})`,
         }
       }
       const row = getPaper(rt.db, args.paperId)

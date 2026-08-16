@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { openDb, upsertPaper, type Db } from '../src/db.js'
-import { fetchPdf } from '../src/fetch/pdf.js'
+import { fetchPdf, inRetryCooldown } from '../src/fetch/pdf.js'
 import type { PdfCandidate } from '../src/sources/types.js'
 
 function fakeFetch(routes: Array<{ status: number; body: Buffer | string }>) {
@@ -47,6 +47,7 @@ function seedPaper(db: Db, id: string): void {
     arxiv_id: id.replace('arxiv:', ''),
     openalex_id: null,
     url: null,
+    oa_pdf_url: null,
     abstract: null,
     citations: 1,
     bibtex: null,
@@ -123,6 +124,25 @@ describe('fetchPdf multi-source fallback', () => {
     )
     expect(result.outcome).toBe('FULLTEXT_UNAVAILABLE')
     expect(result.attempts[0]!.status).toBe('too_small')
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('retry cooldown (audit fix)', () => {
+  it('suppresses re-attempts within the TTL and expires after it', () => {
+    const { db, dir } = tempDb()
+    seedPaper(db, 'arxiv:2401.099')
+    db.prepare(
+      "INSERT INTO fetch_log (paper_id, attempts, outcome, created_at) VALUES (?, '[]', 'FULLTEXT_UNAVAILABLE', datetime('now'))",
+    ).run('arxiv:2401.099')
+    expect(inRetryCooldown(db, 'arxiv:2401.099', 72)).not.toBeNull()
+    expect(inRetryCooldown(db, 'arxiv:2401.099', 0)).toBeNull()
+    // a stale (old) unavailable record is outside the TTL
+    db.prepare(
+      "INSERT INTO fetch_log (paper_id, attempts, outcome, created_at) VALUES (?, '[]', 'FULLTEXT_UNAVAILABLE', datetime('now', '-100 hours'))",
+    ).run('arxiv:2401.099')
+    expect(inRetryCooldown(db, 'arxiv:2401.099', 72)).toBeNull()
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })

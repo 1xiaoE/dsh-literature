@@ -23,8 +23,13 @@ interface OpenAlexWork {
     source?: { display_name?: string }
     pdf_url?: string | null
     landing_page_url?: string | null
+    url_for_pdf?: string | null
   }
-  best_oa_location?: { pdf_url?: string | null; landing_page_url?: string | null } | null
+  best_oa_location?: {
+    pdf_url?: string | null
+    landing_page_url?: string | null
+    url_for_pdf?: string | null
+  } | null
   abstract_inverted_index?: Record<string, number[]> | null
 }
 
@@ -78,7 +83,9 @@ export class OpenAlexAdapter implements SourceAdapter {
     if (!title) return null
     const id = w.id.split('/').pop() ?? ''
     const doi = w.doi ? w.doi.replace(/^https?:\/\/doi\.org\//, '') : undefined
-    const pdf = w.best_oa_location?.pdf_url ?? w.primary_location?.pdf_url ?? undefined
+    // landing page ≠ OA PDF: only url_for_pdf/pdf_url counts as a fulltext signal
+    const oaPdf = w.best_oa_location?.url_for_pdf ?? w.primary_location?.pdf_url ?? undefined
+    const landing = w.primary_location?.landing_page_url ?? w.best_oa_location?.landing_page_url ?? undefined
     return {
       id: `openalex:${id}`,
       title: title.trim(),
@@ -87,7 +94,8 @@ export class OpenAlexAdapter implements SourceAdapter {
       year: w.publication_year,
       doi,
       openalexId: id,
-      url: pdf ?? w.primary_location?.landing_page_url ?? undefined,
+      url: landing ?? undefined,
+      oaPdfUrl: oaPdf ?? undefined,
       abstract: reconstructAbstract(w.abstract_inverted_index),
       citations: w.cited_by_count,
       metadataSource: this.name,
@@ -152,14 +160,14 @@ export class OpenAlexAdapter implements SourceAdapter {
 
   async pdfCandidates(paper: PaperRef): Promise<PdfCandidate[]> {
     const out: PdfCandidate[] = []
-    if (!paper.url) {
-      const ext = await this.expand(paper)
-      if (ext?.url) {
-        out.push({ url: ext.url, license: 'oa', source: this.name })
-      }
-      return out
+    const push = (u: string | undefined): void => {
+      if (u) out.push({ url: u, license: 'oa', source: this.name })
     }
-    out.push({ url: paper.url, license: 'oa', source: this.name })
+    push(paper.oaPdfUrl)
+    if (out.length === 0) {
+      const ext = await this.expand(paper)
+      push(ext?.oaPdfUrl)
+    }
     return out
   }
 }

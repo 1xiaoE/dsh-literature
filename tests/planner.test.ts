@@ -277,7 +277,7 @@ describe('fundamentals stage ranking', () => {
     const rows = [...fundamentals, ...offStage]
       .map(([title, year, citations, pool]) => {
         const r = mk(title, year, citations, pool as 'recent' | 'landmark')
-        const pre = preRank(r, cfg, now, pool as 'recent' | 'landmark')
+        const pre = preRank(r, cfg, { topicText: cfg.topics[0]!.canonicalQueries.join(' '), currentYear: now }, pool as 'recent' | 'landmark')
         return { r, pre }
       })
       // mirror the pipeline's off-topic floor (minTopicSimilarity)
@@ -335,12 +335,11 @@ describe('priority goal + curated seeds (V0.3)', () => {
   it('priority goal is the first uncovered goal in stage order', () => {
     const cfg = defaultConfig()
     const stage = cfg.stageOrder[0]! // 基础控制
-    const covered = new Set(['whole_body', 'contact_force'])
-    const pg = firstUncoveredGoal(stage, covered)
-    expect(pg?.id).toBe('balance_stability')
-    // after covering balance_stability, the next priority is impedance_compliance
-    const pg2 = firstUncoveredGoal(stage, new Set([...covered, 'balance_stability']))
-    expect(pg2?.id).toBe('impedance_compliance')
+    const pg = firstUncoveredGoal(stage, new Set())
+    expect(pg?.id).toBe('template_dynamics')
+    // after covering template_dynamics, the next priority is balance_stability
+    const pg2 = firstUncoveredGoal(stage, new Set(['template_dynamics']))
+    expect(pg2?.id).toBe('balance_stability')
   })
 
   it('landmark pool plans seed-title anchor queries', () => {

@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS retrievals (
   retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS fulltext_reads (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id  INTEGER REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  seq      INTEGER NOT NULL,
+  read_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS knowledge_coverage (
   push_id  INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
   paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
@@ -127,4 +135,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 5;
+PRAGMA user_version = 6;

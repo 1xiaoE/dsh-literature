@@ -24,17 +24,22 @@ export type { LiteratureConfig } from './config.js'
 export { chunkText } from './fetch/fulltext.js'
 
 /**
- * Read the harness-resolved model route for provenance without depending on
- * the agent-default-model package: absent service yields null.
+ * Read the harness-resolved model route for provenance via the official
+ * AgentDefaultModel service (a Cordis Service registered as
+ * 'agentDefaultModel'); absent service yields null. Business code never
+ * hardcodes a model id.
  */
 function modelRouteReader(ctx: Context): () => string | null {
   return () => {
     try {
-      const maybe = ctx as unknown as {
-        agentDefaultModel?: { currentSelection?: () => unknown }
-      }
-      const sel = maybe.agentDefaultModel?.currentSelection?.()
-      return sel ? JSON.stringify(sel) : null
+      const svc = ctx.get('agentDefaultModel') as
+        | { currentSelection?: () => { provider?: string; model?: string; reasoningEffort?: string } }
+        | undefined
+      const sel = svc?.currentSelection?.()
+      if (!sel) return null
+      const out: Record<string, string> = { provider: String(sel.provider ?? 'unknown'), model: String(sel.model ?? 'unknown') }
+      if (sel.reasoningEffort) out.reasoningEffort = String(sel.reasoningEffort)
+      return JSON.stringify(out)
     } catch {
       return null
     }

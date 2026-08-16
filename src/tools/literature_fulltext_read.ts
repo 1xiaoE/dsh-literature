@@ -9,6 +9,7 @@ import { readChunk } from '../fetch/fulltext.js'
 export interface FulltextReadInput {
   paperId: string
   seq: number
+  pushId?: number
 }
 
 export interface FulltextReadOutput {
@@ -29,6 +30,7 @@ export function defineLiteratureFulltextRead(getRt: () => LiteratureRuntime) {
     parameters: {
       paperId: { type: 'string', required: true, description: '论文 id' },
       seq: { type: 'integer', required: true, description: '分块序号（来自索引）' },
+      pushId: { type: 'integer', description: '推送号；提供时自动记录本次阅读（fulltext_reads，供完成前覆盖率校验）' },
     },
     output: {
       schema: {
@@ -58,6 +60,11 @@ export function defineLiteratureFulltextRead(getRt: () => LiteratureRuntime) {
       const chunk = readChunk(rt.db, args.paperId, args.seq)
       if (!chunk) {
         return { paperId: args.paperId, seq: args.seq, found: false }
+      }
+      if (args.pushId !== undefined) {
+        rt.db
+          .prepare('INSERT INTO fulltext_reads (push_id, paper_id, seq) VALUES (?, ?, ?)')
+          .run(args.pushId, args.paperId, args.seq)
       }
       return {
         paperId: args.paperId,

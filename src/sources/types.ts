@@ -45,7 +45,10 @@ export interface PaperRef {
   doi?: string
   arxivId?: string
   openalexId?: string
+  /** landing page (may be a paywall) — NOT a fulltext signal */
   url?: string
+  /** actual OA PDF URL — the only url-based fulltext signal */
+  oaPdfUrl?: string
   abstract?: string
   citations?: number
   /** provenance: adapter name that produced this record */

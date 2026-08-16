@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 export type Db = DatabaseSync
 
@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS papers (
   arxiv_id        TEXT,
   openalex_id     TEXT,
   url             TEXT,
+  oa_pdf_url      TEXT,
   abstract        TEXT,
   citations       INTEGER,
   bibtex          TEXT,
@@ -136,6 +137,14 @@ CREATE TABLE IF NOT EXISTS retrievals (
   retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS fulltext_reads (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id  INTEGER REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  seq      INTEGER NOT NULL,
+  read_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS stages (
   topic           TEXT PRIMARY KEY,
   current         INTEGER NOT NULL DEFAULT 1,
@@ -176,7 +185,10 @@ CREATE TABLE IF NOT EXISTS stages (
     db.exec('ALTER TABLE candidates ADD COLUMN selection_rejection_reason TEXT;')
     db.exec('ALTER TABLE candidates ADD COLUMN landmark_confidence REAL;')
     db.exec('ALTER TABLE candidates ADD COLUMN methodological_centrality REAL;')
-    db.exec("ALTER TABLE stages ADD COLUMN covered_goals TEXT NOT NULL DEFAULT '[]';")
+    const stageCols = db.prepare('PRAGMA table_info(stages)').all() as Array<{ name: string }>
+    if (!stageCols.some((c) => c.name === 'covered_goals')) {
+      db.exec("ALTER TABLE stages ADD COLUMN covered_goals TEXT NOT NULL DEFAULT '[]';")
+    }
     db.exec(
       `CREATE TABLE IF NOT EXISTS knowledge_coverage (
         push_id  INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
@@ -196,6 +208,29 @@ CREATE TABLE IF NOT EXISTS stages (
       db.exec('ALTER TABLE candidates DROP COLUMN selection_rank;')
     }
   }
+  if (version < 6) {
+    // oa pdf url split (landing page is NOT a fulltext signal)
+    const paperCols = db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>
+    if (!paperCols.some((c) => c.name === 'oa_pdf_url')) {
+      db.exec('ALTER TABLE papers ADD COLUMN oa_pdf_url TEXT;')
+    }
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS fulltext_reads (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        push_id  INTEGER REFERENCES pushes(id) ON DELETE CASCADE,
+        paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+        seq      INTEGER NOT NULL,
+        read_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );`,
+    )
+    // legacy topic aliases → canonical id (keeps historical dedup working)
+    db.exec(
+      "UPDATE pushes SET topic = 'legged_robot_control' WHERE topic IN ('足式机器人控制', 'legged robot control', 'legged robot')",
+    )
+    db.exec(
+      "DELETE FROM stages WHERE topic IN ('足式机器人控制', 'legged robot control', 'legged robot') AND topic != 'legged_robot_control'",
+    )
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }
 
@@ -209,6 +244,7 @@ export interface PaperRow {
   arxiv_id: string | null
   openalex_id: string | null
   url: string | null
+  oa_pdf_url: string | null
   abstract: string | null
   citations: number | null
   bibtex: string | null
@@ -218,12 +254,12 @@ export interface PaperRow {
 /** Upsert a paper; returns its canonical id. */
 export function upsertPaper(db: Db, p: PaperRow): string {
   db.prepare(
-    `INSERT INTO papers (id,title,authors,venue,year,doi,arxiv_id,openalex_id,url,abstract,citations,bibtex,metadata_source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO papers (id,title,authors,venue,year,doi,arxiv_id,openalex_id,url,oa_pdf_url,abstract,citations,bibtex,metadata_source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET
        title=excluded.title, authors=excluded.authors, venue=excluded.venue, year=excluded.year,
        doi=excluded.doi, arxiv_id=excluded.arxiv_id, openalex_id=excluded.openalex_id,
-       url=excluded.url, abstract=excluded.abstract, citations=excluded.citations,
+       url=excluded.url, oa_pdf_url=excluded.oa_pdf_url, abstract=excluded.abstract, citations=excluded.citations,
        bibtex=excluded.bibtex, metadata_source=excluded.metadata_source`,
   ).run(
     p.id,
@@ -235,6 +271,7 @@ export function upsertPaper(db: Db, p: PaperRow): string {
     p.arxiv_id,
     p.openalex_id,
     p.url,
+    p.oa_pdf_url,
     p.abstract,
     p.citations,
     p.bibtex,

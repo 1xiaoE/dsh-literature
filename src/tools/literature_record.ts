@@ -17,7 +17,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { getPush } from '../lib/history.js'
 import { agentFinalScore } from '../lib/ranking.js'
-import { recordPaperInStage, getStage, stageLabel } from '../lib/stages.js'
+import { recordPaperInStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
 
 export type PushStatus = 'completed' | 'failed' | 'no_candidate' | 'fulltext_unavailable'
 export type SelectionOutcome = 'SELECTED' | 'FULLTEXT_UNAVAILABLE' | 'BELOW_QUALITY_GATE' | 'PDF_FAILED'
@@ -69,6 +69,7 @@ export interface RecordOutput {
   stageAdvanced: boolean
   duplicate: boolean
   stageMatched: boolean
+  readsCount: number
 }
 
 export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRoute: () => string | null) {
@@ -150,6 +151,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
           stageAdvanced: { type: 'boolean', required: true },
           duplicate: { type: 'boolean', required: true },
           stageMatched: { type: 'boolean', required: true },
+          readsCount: { type: 'integer', required: true },
         },
       },
       render: (_args, value: RecordOutput) => [
@@ -167,6 +169,8 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         throw new Error(`push #${args.pushId} 不存在`)
       }
       const topic = push.topic
+      const stageDefNow = stageDef(cfg.stageOrder, push.stage)
+      const curriculumWeight = stageDefNow?.curriculumWeight
 
       // --- semantic ranking trace (Stage B) ---
       if (args.scores && args.scores.length > 0) {
@@ -188,6 +192,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
               curriculumValue: s.curriculumValue,
             },
             cfg,
+            curriculumWeight,
           )
           update.run(
             s.relevance,
@@ -251,7 +256,25 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
 
       // --- quality gates: picked paper must pass stage AND curriculum ---
       let stageMatched = false
+      let readsCount = 0
       if (args.status === 'completed' && args.paperId) {
+        // full-text reading coverage: the picked paper must have been read
+        // chunk-by-chunk through literature_fulltext_read within this push
+        readsCount = (
+          db
+            .prepare(
+              'SELECT COUNT(*) AS n FROM fulltext_reads WHERE push_id = ? AND paper_id = ?',
+            )
+            .get(args.pushId, args.paperId) as { n: number }
+        ).n
+        const ft = db
+          .prepare("SELECT chunk_count FROM fulltexts WHERE paper_id = ? AND status = 'ok'")
+          .get(args.paperId) as { chunk_count: number } | undefined
+        if (ft && ft.chunk_count > 0 && readsCount === 0) {
+          throw new Error(
+            `picked 论文 ${args.paperId} 尚未通过 literature_fulltext_read 阅读任何 chunk（全文 ${ft.chunk_count} 块）；完成前请先逐块精读`,
+          )
+        }
         if (args.selection) {
           const pickedSel = args.selection.find((s) => s.paperId === args.paperId)
           if (!pickedSel || pickedSel.outcome !== 'SELECTED') {
@@ -355,6 +378,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         stageAdvanced: advanced,
         duplicate,
         stageMatched,
+        readsCount,
       } satisfies RecordOutput
     },
   })

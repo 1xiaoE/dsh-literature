@@ -34,12 +34,12 @@ describe('ranking', () => {
     const good = preRank(
       { title: 'Legged Robot Control via MPC', year: now, citations: 500, fulltextAvailable: true },
       cfg,
-      now,
+      { topicText: 'legged robot locomotion control legged robot control quadruped locomotion control', currentYear: now },
     )
     const bad = preRank(
       { title: 'Legged Robot Control via MPC', year: now - 9, citations: 0, fulltextAvailable: false },
       cfg,
-      now,
+      { topicText: 'legged robot locomotion control legged robot control quadruped locomotion control', currentYear: now },
     )
     expect(good.score).toBeGreaterThan(bad.score)
 
@@ -50,7 +50,7 @@ describe('ranking', () => {
     const zero = preRank(
       { title: 'Legged Robot Control via MPC', year: now, citations: 500, fulltextAvailable: true },
       zeroWeights,
-      now,
+      { topicText: 'legged robot locomotion control', currentYear: now },
     )
     expect(zero.score).toBe(0)
   })
@@ -158,5 +158,27 @@ describe('history.startPush supersede', () => {
     expect(getPush(db, p2.pushId)?.status).toBe('running')
     db.close()
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('curriculum weight renormalization (audit fix)', () => {
+  it('stage curriculumWeight actually changes the final score and stays normalized', () => {
+    const cfg = defaultConfig()
+    const scores = {
+      relevance: 0.8,
+      learningValue: 0.6,
+      representativeness: 0.5,
+      novelty: 0.3,
+      stageRelevance: 0.7,
+      curriculumValue: 0.9,
+    }
+    const base = agentFinalScore(scores, cfg)
+    const boosted = agentFinalScore(scores, cfg, 0.35) // Fundamentals override
+    expect(boosted).toBeGreaterThan(base) // curriculum boost is live
+    // renormalized weights sum to 1
+    const w = cfg.agentRanking
+    const scale = (1 - 0.35) / (1 - w.curriculumValue)
+    const sum = 0.35 + scale * (w.relevance + w.learningValue + w.representativeness + w.novelty + w.stageRelevance)
+    expect(sum).toBeCloseTo(1, 6)
   })
 })
