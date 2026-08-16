@@ -15,11 +15,18 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import type { Db } from '../db.js'
 import { getPush } from '../lib/history.js'
 import { agentFinalScore } from '../lib/ranking.js'
 import { recordPaperInStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
 
-export type PushStatus = 'completed' | 'failed' | 'no_candidate' | 'fulltext_unavailable'
+export type PushStatus =
+  | 'completed'
+  | 'failed'
+  | 'no_candidate'
+  | 'fulltext_unavailable'
+  | 'auth_required'
+  | 'user_action_required'
 export type SelectionOutcome = 'SELECTED' | 'FULLTEXT_UNAVAILABLE' | 'BELOW_QUALITY_GATE' | 'PDF_FAILED'
 
 export interface RecordScoreEntry {
@@ -67,9 +74,52 @@ export interface RecordOutput {
   targetPapers: number
   coveredGoals: string[]
   stageAdvanced: boolean
+  /** required goals still uncovered — why the stage did not graduate */
+  pendingRequiredGoals: string[]
   duplicate: boolean
   stageMatched: boolean
   readsCount: number
+  /** full-text reading coverage provenance (completed picks) */
+  totalChunks: number
+  readChunks: number
+  readCoverage: number
+  coverageBasis: 'full_read' | 'index_exposed' | 'read_log'
+}
+
+/**
+ * Reading-coverage provenance:
+ * - totalChunks: chunks indexed by literature_fulltext_index;
+ * - readChunks:   distinct seqs actually read via literature_fulltext_read;
+ * - readCoverage: readChunks / totalChunks;
+ * - coverageBasis:
+ *     'full_read'     — every chunk was read via literature_fulltext_read;
+ *     'index_exposed' — some chunks were NOT read, but literature_fulltext_index
+ *                       exposed ALL chunk previews to the model. Reports must
+ *                       state read_chunks/total_chunks with this basis and MUST
+ *                       NOT claim "全部精读";
+ *     'read_log'      — no index exists (nothing exposed).
+ */
+export function readingCoverage(
+  db: Db,
+  pushId: number,
+  paperId: string,
+): { totalChunks: number; readChunks: number; readCoverage: number; coverageBasis: 'full_read' | 'index_exposed' | 'read_log' } {
+  const ft = db
+    .prepare("SELECT chunk_count FROM fulltexts WHERE paper_id = ? AND status = 'ok'")
+    .get(paperId) as { chunk_count: number } | undefined
+  const total = ft?.chunk_count ?? 0
+  const readRow = db
+    .prepare('SELECT COUNT(DISTINCT seq) AS n FROM fulltext_reads WHERE push_id = ? AND paper_id = ?')
+    .get(pushId, paperId) as { n: number }
+  const read = readRow?.n ?? 0
+  if (total <= 0) return { totalChunks: 0, readChunks: 0, readCoverage: 0, coverageBasis: 'read_log' }
+  const basis = read >= total ? ('full_read' as const) : ('index_exposed' as const)
+  return {
+    totalChunks: total,
+    readChunks: read,
+    readCoverage: Math.round((read / total) * 100) / 100,
+    coverageBasis: basis,
+  }
 }
 
 export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRoute: () => string | null) {
@@ -82,8 +132,9 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       status: {
         type: 'string',
         required: true,
-        enum: ['completed', 'failed', 'no_candidate', 'fulltext_unavailable'],
-        description: '推送结果状态',
+        enum: ['completed', 'failed', 'no_candidate', 'fulltext_unavailable', 'auth_required', 'user_action_required'],
+        description:
+          '推送结果状态。需要用户介入（认证/资源/权限/下载渠道/研究选择）时用 user_action_required（先 literature_user_action open，不得记为 fulltext_unavailable）；CARSI 会话失效可用 auth_required（errorCode=AUTH_REQUIRED）。',
       },
       paperId: { type: 'string', description: '选中的论文 id（completed 时必填）' },
       reportPath: { type: 'string', description: '精读报告归档路径（provenance）' },
@@ -149,15 +200,24 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
           targetPapers: { type: 'integer', required: true },
           coveredGoals: { type: 'array', items: { type: 'string' }, required: true },
           stageAdvanced: { type: 'boolean', required: true },
+          pendingRequiredGoals: { type: 'array', items: { type: 'string' }, required: true },
           duplicate: { type: 'boolean', required: true },
           stageMatched: { type: 'boolean', required: true },
           readsCount: { type: 'integer', required: true },
+          totalChunks: { type: 'integer', required: true },
+          readChunks: { type: 'integer', required: true },
+          readCoverage: { type: 'number', required: true },
+          coverageBasis: {
+            type: 'string',
+            required: true,
+            enum: ['full_read', 'index_exposed', 'read_log'],
+          },
         },
       },
       render: (_args, value: RecordOutput) => [
         {
           type: 'text',
-          text: `push #${value.pushId} → ${value.status}；阶段「${value.stageLabel}」进度 ${value.papersInStage}/${value.targetPapers}（覆盖 ${value.coveredGoals.join(',') || '无'}）${value.stageAdvanced ? '（已推进到下一阶段）' : ''}${value.duplicate ? '（重复推荐，不计进度）' : ''}${value.stageMatched ? '' : '（与当前阶段不匹配，不计进度）'}`,
+          text: `push #${value.pushId} → ${value.status}；阶段「${value.stageLabel}」进度 ${value.papersInStage}/${value.targetPapers}（覆盖 ${value.coveredGoals.join(',') || '无'}）${value.stageAdvanced ? '（已推进到下一阶段）' : ''}${value.pendingRequiredGoals.length > 0 ? `（required goal pending: ${value.pendingRequiredGoals.join(',')}）` : ''}${value.duplicate ? '（重复推荐，不计进度）' : ''}${value.stageMatched ? '' : '（与当前阶段不匹配，不计进度）'}${value.status === 'completed' ? `；阅读 ${value.readChunks}/${value.totalChunks}（覆盖率 ${value.readCoverage}，basis=${value.coverageBasis}）` : ''}`,
         },
       ],
     },
@@ -211,10 +271,30 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       }
 
       // --- selection trail (invariant-enforced) ---
-      if (args.status === 'fulltext_unavailable' && (!args.selection || args.selection.length === 0)) {
+      if (
+        (args.status === 'fulltext_unavailable' || args.status === 'auth_required') &&
+        (!args.selection || args.selection.length === 0)
+      ) {
         throw new Error(
-          'fulltext_unavailable 必须提交 selection 轨迹（全部尝试的候选、agentRank、attemptOrder、outcome 与原因）',
+          `${args.status} 必须提交 selection 轨迹（全部尝试的候选、agentRank、attemptOrder、outcome 与原因）`,
         )
+      }
+      if (args.errorCode === 'AUTH_REQUIRED' && args.status !== 'auth_required' && args.status !== 'user_action_required') {
+        throw new Error(
+          'errorCode=AUTH_REQUIRED 时 status 必须为 auth_required 或 user_action_required（CARSI 会话失效≠fulltext_unavailable，需提示用户重新登录）',
+        )
+      }
+      // NEED_USER_ACTION invariant: status user_action_required requires at
+      // least one open user_actions row registered via literature_user_action
+      if (args.status === 'user_action_required') {
+        const open = db
+          .prepare("SELECT COUNT(*) AS n FROM user_actions WHERE push_id = ? AND state = 'open'")
+          .get(args.pushId) as { n: number }
+        if (open.n === 0) {
+          throw new Error(
+            'status=user_action_required 必须先调用 literature_user_action(open) 注册至少一项待办（五要素：卡点/缺什么/试过什么/用户做什么/如何继续）',
+          )
+        }
       }
       if (args.selection && args.selection.length > 0) {
         const sorted = [...args.selection].sort((a, b) => a.attemptOrder - b.attemptOrder)
@@ -309,9 +389,19 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       }
 
       // --- status + provenance ---
+      let coverage: ReturnType<typeof readingCoverage> = {
+        totalChunks: 0,
+        readChunks: 0,
+        readCoverage: 0,
+        coverageBasis: 'read_log',
+      }
+      if (args.status === 'completed' && args.paperId) {
+        coverage = readingCoverage(db, args.pushId, args.paperId)
+      }
       db.prepare(
         `UPDATE pushes SET status = ?, finished_at = datetime('now'), paper_id = ?,
-           report_path = ?, error_code = ?, error_detail = ?, notes = ?, model_route = ?
+           report_path = ?, error_code = ?, error_detail = ?, notes = ?, model_route = ?,
+           total_chunks = ?, read_chunks = ?, read_coverage = ?, coverage_basis = ?
          WHERE id = ?`,
       ).run(
         args.status,
@@ -321,11 +411,16 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         args.errorDetail ?? null,
         args.notes ?? null,
         modelRoute(),
+        coverage.totalChunks || null,
+        coverage.readChunks || null,
+        coverage.readCoverage || null,
+        coverage.coverageBasis,
         args.pushId,
       )
 
       // --- knowledge coverage + stage progression ---
       let advanced = false
+      let pendingRequired: string[] = []
       let duplicate = false
       if (args.status === 'completed' && args.paperId) {
         const seenBefore = db
@@ -354,8 +449,10 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
             minCoverage: cfg.minKnowledgeCoverage,
             coveredGoals: goals,
             forceAdvance: args.advanceStage ?? false,
+            requiredGoals: stageDefNow?.requiredGoals ?? [],
           })
           advanced = res.advanced
+          pendingRequired = res.pendingRequired
         } else if (args.advanceStage) {
           const res = recordPaperInStage(db, topic, {
             targetPapers: cfg.targetPapersPerStage,
@@ -376,9 +473,14 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         targetPapers: stage.targetPapers,
         coveredGoals: stage.coveredGoals,
         stageAdvanced: advanced,
+        pendingRequiredGoals: pendingRequired,
         duplicate,
         stageMatched,
         readsCount,
+        totalChunks: coverage.totalChunks,
+        readChunks: coverage.readChunks,
+        readCoverage: coverage.readCoverage,
+        coverageBasis: coverage.coverageBasis,
       } satisfies RecordOutput
     },
   })

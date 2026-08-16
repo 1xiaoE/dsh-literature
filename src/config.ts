@@ -56,6 +56,14 @@ export interface StageDef {
   searchQueries: string[]
   /** knowledge goals for stage progress (coverage-gated advancement) */
   knowledgeGoals: KnowledgeGoal[]
+  /**
+   * Goal ids that MUST be covered before the stage can graduate, regardless
+   * of paper count. When papers_in_stage reaches targetPapers - 1 and a
+   * required goal is still pending, the stage enters required-goal
+   * completion mode (priority goal pinned to the pending required goal).
+   * Empty = no hard requirement (ordinary stages).
+   */
+  requiredGoals: string[]
   /** curated landmark seeds as retrieval/curriculum anchors (title/doi/arxiv + goals) */
   landmarkSeeds: Array<{ doi?: string; arxivId?: string; title: string; goals: string[] }>
   /** optional per-stage override of the curriculum_value weight (Fundamentals boost) */
@@ -144,6 +152,27 @@ export interface LiteratureConfig {
     /** email required by the Unpaywall legal-OA locator */
     unpaywallEmail: string
   }
+  carsi: {
+    /**
+     * Master switch for the CARSI institutional-access fallback. CARSI is
+     * NOT an OA source (access_type=institutional, is_open_access=false) and
+     * is only ever used AFTER the whole public chain failed, for papers that
+     * already passed the ranking quality gates.
+     */
+    enabled: boolean
+    /** max CARSI-involved papers per push (strict low frequency; 1 = the picked paper only) */
+    maxPerPush: number
+    /** minimum minutes between CARSI browser attempts */
+    minIntervalMinutes: number
+    /** headless for cron pushes; the login CLI forces a headed browser */
+    headless: boolean
+    /** per-attempt browser timeout (ms) */
+    timeoutMs: number
+    /** persistent profile dir override; empty = <dataDir>/browser-profile */
+    profileDir: string
+    /** desktop User-Agent for the browser (SPs often block automation UAs) */
+    userAgent: string
+  }
 }
 
 export const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
@@ -228,9 +257,9 @@ export const DEFAULT_STAGES: StageDef[] = [
     knowledgeGoals: [
       { id: 'template_dynamics', label: 'template / simplified dynamics', keywords: ['template model', 'inverted pendulum', 'lipm', 'slip', 'spring loaded', 'centroidal', 'zmp', 'simplified model'] },
       { id: 'balance_stability', label: 'balance and stability', keywords: ['balance', 'stability', 'push recovery', 'capture point', 'postural', 'equilibrium', 'capture input', 'ankle strategy'] },
-      { id: 'gait_representation', label: 'gait representation / walking pattern', keywords: ['gait', 'walking pattern', 'gait generation', 'foot placement', 'step planning', 'phase', 'gait transition'] },
+      { id: 'gait_representation', label: 'gait representation / walking pattern', keywords: ['gait', 'walking pattern', 'gait generation', 'gait synthesis', 'gait pattern', 'gait cycle', 'foot placement', 'footstep', 'step planning', 'step-to-step', 'phase', 'gait transition'] },
       { id: 'kinematics_jacobian', label: 'kinematics / jacobian', keywords: ['kinematics', 'jacobian', 'inverse kinematics', 'leg kinematics', 'kinematic model', 'workspace'] },
-      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'compliance', 'stiffness', 'damping', 'virtual spring', 'compliant', 'virtual model'] },
+      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'impedance control', 'compliance', 'compliance control', 'compliant', 'stiffness', 'stiffness control', 'damping', 'damper', 'spring', 'spring-damper', 'virtual spring', 'virtual model', 'force position compliance'] },
     ],
     landmarkSeeds: [
       {
@@ -245,6 +274,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       },
     ],
     curriculumWeight: 0.35,
+    requiredGoals: ['template_dynamics', 'balance_stability', 'impedance_compliance'],
   },
   {
     label: '动力学/接触控制',
@@ -254,6 +284,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'whole_body', label: 'whole-body locomotion control', keywords: ['whole-body control', 'whole body control', 'whole body dynamics', 'full body control', 'wbc'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
     preferredKeywords: [
       'whole-body control', 'contact force', 'force distribution', 'wrench',
       'ground reaction', 'grf', 'inverse dynamics', 'hybrid force', 'friction cone',
@@ -297,6 +328,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'trajectory_optimization', label: 'trajectory optimization', keywords: ['trajectory optimization', 'convex optimization', 'qp', 'sqp', 'receding horizon'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
   },
   {
     label: 'RL locomotion',
@@ -322,6 +354,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'sim2real_rl', label: 'sim-to-real transfer', keywords: ['sim-to-real', 'domain randomization', 'zero-shot'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
   },
   {
     label: '鲁棒控制',
@@ -346,6 +379,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'disturbance_rejection', label: 'disturbance rejection', keywords: ['disturbance', 'robust', 'perturbation', 'rejection'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
   },
   {
     label: 'terrain adaptation',
@@ -370,6 +404,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'perception_mapping', label: 'perception / elevation mapping', keywords: ['perception', 'elevation map', 'point cloud', 'exteroception'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
   },
   {
     label: 'sim-to-real',
@@ -393,6 +428,7 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'zero_shot_deploy', label: 'zero-shot deployment', keywords: ['zero-shot', 'deployment', 'real robot', 'hardware'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
   },
   {
     label: '前沿方法',
@@ -416,11 +452,16 @@ export const DEFAULT_STAGES: StageDef[] = [
       { id: 'generative_policies', label: 'generative / world-model policies', keywords: ['diffusion policy', 'world model', 'generative'] },
     ],
     landmarkSeeds: [],
+    requiredGoals: [],
   },
 ]
 
 /** Recency window used when config.yearsPrefer is empty. */
 export const RECENCY_WINDOW_YEARS = 5
+
+/** Default desktop Chrome User-Agent for the CARSI browser session. */
+export const DEFAULT_CARSI_USER_AGENT =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
 /** @returns the current UTC year. */
 export function currentYear(): number {
@@ -461,6 +502,15 @@ export function defaultConfig(): LiteratureConfig {
     agentRanking: { ...DEFAULT_AGENT_RANKING_WEIGHTS },
     fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext', retryCooldownHours: 72 },
     http: { timeoutMs: 30000, minPdfBytes: 10240, unpaywallEmail: 'dsh-literature@example.org' },
+    carsi: {
+      enabled: true,
+      maxPerPush: 1,
+      minIntervalMinutes: 120,
+      headless: true,
+      timeoutMs: 90000,
+      profileDir: '',
+      userAgent: DEFAULT_CARSI_USER_AGENT,
+    },
   }
 }
 
@@ -539,6 +589,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
     agentRanking: { ...base.agentRanking },
     fulltext: { ...base.fulltext },
     http: { ...base.http },
+    carsi: { ...base.carsi },
   }
   if (Array.isArray(partial.topics)) {
     const defs = partial.topics.filter(isTopicDef)
@@ -546,7 +597,9 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
   }
   if (Array.isArray(partial.stageOrder)) {
     const defs = partial.stageOrder.filter(isStageDef)
-    if (defs.length > 0) out.stageOrder = defs
+    if (defs.length > 0) {
+      out.stageOrder = defs.map((s) => ({ ...s, requiredGoals: s.requiredGoals ?? [] }))
+    }
   }
   if (isRecord(partial.retrieval)) {
     out.retrieval = {
@@ -616,6 +669,17 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
       timeoutMs: pickNumber(partial.http, 'timeoutMs', base.http.timeoutMs),
       minPdfBytes: pickNumber(partial.http, 'minPdfBytes', base.http.minPdfBytes),
       unpaywallEmail: pickString(partial.http, 'unpaywallEmail', base.http.unpaywallEmail),
+    }
+  }
+  if (isRecord(partial.carsi)) {
+    out.carsi = {
+      enabled: typeof partial.carsi.enabled === 'boolean' ? partial.carsi.enabled : base.carsi.enabled,
+      maxPerPush: pickNumber(partial.carsi, 'maxPerPush', base.carsi.maxPerPush),
+      minIntervalMinutes: pickNumber(partial.carsi, 'minIntervalMinutes', base.carsi.minIntervalMinutes),
+      headless: typeof partial.carsi.headless === 'boolean' ? partial.carsi.headless : base.carsi.headless,
+      timeoutMs: pickNumber(partial.carsi, 'timeoutMs', base.carsi.timeoutMs),
+      profileDir: pickString(partial.carsi, 'profileDir', base.carsi.profileDir),
+      userAgent: pickString(partial.carsi, 'userAgent', base.carsi.userAgent),
     }
   }
   return out

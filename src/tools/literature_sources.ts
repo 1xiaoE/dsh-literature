@@ -20,13 +20,14 @@ import {
   curriculumHint,
   landmarkConfidence,
   knowledgeGapHint,
+  priorityGoalMatchScore,
   type PreRankResult,
   type StageRelevanceResult,
 } from '../lib/ranking.js'
 import { currentYear, type TopicDef } from '../config.js'
 import { seenPaperIds, startPush } from '../lib/history.js'
 import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
-import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility, matchSeed, firstUncoveredGoal } from '../lib/planner.js'
+import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility, matchSeed, decidePriorityGoal } from '../lib/planner.js'
 import type { PaperRef, PlannedQuery } from '../sources/types.js'
 import { canonicalId } from '../sources/types.js'
 import { mergeWithLabels, type RetrievalProvenance } from '../sources/registry.js'
@@ -54,6 +55,10 @@ export interface SourcesOutput {
   coveredGoals: string[]
   uncoveredGoals: Array<{ id: string; label: string }>
   priorityGoal?: { id: string; label: string }
+  /** 'completion' = required-goal completion mode (priority goal pinned to a pending required goal) */
+  priorityGoalMode: 'normal' | 'completion'
+  /** required goals still uncovered — the stage cannot graduate until these are covered */
+  pendingRequiredGoals: string[]
   queriesGenerated: Array<{ text: string; kind: string; pool: string }>
   rawCount: number
   dedupedCount: number
@@ -88,7 +93,7 @@ export interface SourcesOutput {
     landmarkConfidence: number
     knowledgeGapHint: number
     knowledgeGapGoals: string[]
-    priorityGoalMatch: boolean
+    priorityGoalMatch: number
     inCooldown: boolean
     retrieval: Array<{ source: string; query: string; score?: number }>
     rankHint: number
@@ -190,6 +195,8 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             additionalProperties: false,
             properties: { id: { type: 'string', required: true }, label: { type: 'string', required: true } },
           },
+          priorityGoalMode: { type: 'string', required: true, enum: ['normal', 'completion'] },
+          pendingRequiredGoals: { type: 'array', items: { type: 'string' }, required: true },
           uncoveredGoals: {
             type: 'array',
             required: true,
@@ -254,7 +261,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 landmarkConfidence: { type: 'number', required: true },
                 knowledgeGapHint: { type: 'number', required: true },
                 knowledgeGapGoals: { type: 'array', items: { type: 'string' }, required: true },
-                priorityGoalMatch: { type: 'boolean', required: true },
+                priorityGoalMatch: { type: 'number', required: true },
                 inCooldown: { type: 'boolean', required: true },
                 retrieval: {
                   type: 'array',
@@ -332,13 +339,15 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       const insertCandidate = db.prepare(
         `INSERT INTO candidates
            (push_id, paper_id, rank_hint, picked, recency_score, impact_score,
-            topic_similarity, fulltext_available, stage_relevance_hint, candidate_pool, is_seen)
-         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            topic_similarity, fulltext_available, stage_relevance_hint,
+            priority_goal_match, candidate_pool, is_seen)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(push_id, paper_id) DO UPDATE SET
            recency_score=excluded.recency_score, impact_score=excluded.impact_score,
            topic_similarity=excluded.topic_similarity,
            fulltext_available=excluded.fulltext_available,
            stage_relevance_hint=excluded.stage_relevance_hint,
+           priority_goal_match=excluded.priority_goal_match,
            candidate_pool=excluded.candidate_pool, is_seen=excluded.is_seen`,
       )
       const insertRetrieval = db.prepare(
@@ -364,10 +373,14 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         curriculum: number
         landmarkConf: number
         gapGoals: string[]
+        pgMatch: number
         inCooldown: boolean
         isSeen: boolean
         prov: RetrievalProvenance[]
       }> = []
+      const pgDecision = def
+        ? decidePriorityGoal(def, covered, stage.papersInStage, cfg.targetPapersPerStage)
+        : { goal: undefined, mode: 'normal' as const, pendingRequired: [] }
       for (const { paper, pool } of merged) {
         const id = canonicalId(paper)
         upsertPaper(db, paperToRow(paper))
@@ -392,10 +405,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           venue: paper.venue ? 1 : 0,
           seedMatch,
         })
-        const priorityGoal = def ? firstUncoveredGoal(def, covered) : undefined
-        const priorityGoalMatch = priorityGoal
-          ? knowledgeGapHint(text, [priorityGoal]).matched.length > 0
-          : false
+        const priorityGoal = pgDecision.goal
+        const pgMatch = priorityGoal
+          ? priorityGoalMatchScore(text, priorityGoal)
+          : { score: 0, matched: [] }
         const cooldownUntil = inRetryCooldown(db, id, cfg.fulltext.retryCooldownHours)
         const fulltextAvailable = quickPdfAvailability(paper) && cooldownUntil === null
         const pre = preRank(
@@ -407,7 +420,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             fulltextAvailable,
             stageRelevance: sr.score,
             knowledgeGap: uncoveredGoals.length > 0 ? gap.score / uncoveredGoals.length : 0,
-            priorityGoalMatch: priorityGoalMatch ? 1 : 0,
+            priorityGoalMatch: pgMatch.score,
           },
           cfg,
           { topicText: topic.canonicalQueries.join(' '), currentYear: now },
@@ -418,7 +431,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           offTopicDropped += 1
           continue
         }
-        rows.push({ paper, pool, pre, sr, curriculum: ch.score, landmarkConf: lc, gapGoals: gap.matched, inCooldown: cooldownUntil !== null, isSeen, prov })
+        rows.push({ paper, pool, pre, sr, curriculum: ch.score, landmarkConf: lc, gapGoals: gap.matched, pgMatch: pgMatch.score, inCooldown: cooldownUntil !== null, isSeen, prov })
         if (prov.length > 0) {
           for (const p of prov) {
             insertRetrieval.run(pushId, id, p.query, p.source, p.retrievalScore, pool)
@@ -438,7 +451,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
 
       const topN = rows.slice(0, Math.max(1, cfg.preRankTopN))
       for (let i = 0; i < topN.length; i += 1) {
-        const { paper, pool, pre, sr, isSeen } = topN[i]!
+        const { paper, pool, pre, sr, pgMatch, isSeen } = topN[i]!
         insertCandidate.run(
           pushId,
           canonicalId(paper),
@@ -448,6 +461,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           pre.topicSimilarity,
           pre.fulltextAvailable ? 1 : 0,
           sr.score,
+          pgMatch,
           pool,
           isSeen ? 1 : 0,
         )
@@ -467,10 +481,11 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         curriculumValueThreshold: cfg.curriculumValueThreshold,
         coveredGoals: [...covered],
         uncoveredGoals: uncoveredGoals.map((g) => ({ id: g.id, label: g.label })),
-        priorityGoal: (() => {
-          const pg = def ? firstUncoveredGoal(def, covered) : undefined
-          return pg ? { id: pg.id, label: pg.label } : undefined
-        })(),
+        priorityGoal: pgDecision.goal
+          ? { id: pgDecision.goal.id, label: pgDecision.goal.label }
+          : undefined,
+        priorityGoalMode: pgDecision.mode,
+        pendingRequiredGoals: pgDecision.pendingRequired,
         queriesGenerated: [...recentQueries, ...landmarkQueries].map((q) => ({
           text: q.text,
           kind: q.kind,
@@ -483,9 +498,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         negativeDropped,
         offTopicDropped,
         total: rows.length,
-        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, inCooldown, isSeen, prov }, i) => {
-          const pg = def ? firstUncoveredGoal(def, covered) : undefined
-          const pgMatch = pg ? knowledgeGapHint(`${paper.title} ${paper.abstract ?? ''}`, [pg]).matched.length > 0 : false
+        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, pgMatch, inCooldown, isSeen, prov }, i) => {
           return clean({
             paperId: canonicalId(paper),
             title: paper.title,

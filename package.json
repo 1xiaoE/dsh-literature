@@ -43,5 +43,8 @@
     "@types/node": "^22.20.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
   }
 }

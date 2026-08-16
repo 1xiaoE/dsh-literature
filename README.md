@@ -26,10 +26,55 @@ topic → search → deduplicate → pre-rank(Top 8-12) → agent rank(Top 1) �
 |---|---|
 | `literature_push_now` | 创建推送并返回分步工作流指令 |
 | `literature_sources` | 多源检索 + 确定性预排序（权重可配置） |
-| `literature_fetch_pdf` | PDF 多源回退下载（sha256 + 溯源） |
+| `literature_fetch_pdf` | PDF 多源回退下载（sha256 + 溯源；CARSI 兜底；manualPdfPath 手动登记） |
 | `literature_fulltext_index` | pdftotext → 分块 → 索引 |
 | `literature_fulltext_read` | 按块读取（token 安全） |
 | `literature_record` | 状态/评分追溯/阶段门控推进 |
+| `literature_user_action` | Human-in-the-loop：注册/完成 NEED_USER_ACTION 待办（五要素） |
+| `literature_resume` | 从原步骤恢复被暂停/中断的推送（不重新检索/评分） |
+
+## Human-in-the-loop（NEED_USER_ACTION）
+
+遇到**资源访问 / 认证 / 权限 / 下载渠道 / 研究选择**问题、且你比自动化更容易解决时，流程**不会盲目重试、也不会直接判失败**——进入 `NEED_USER_ACTION` 状态并明确告知五要素：
+
+1. 卡在哪一步（step）
+2. 缺少什么资源/权限/信息（issue）
+3. 已尝试过哪些方法（attempts）
+4. 你需要做什么（whatUserShouldDo）
+5. 完成后如何继续（howToContinue）
+
+典型场景：CARSI/学校认证失效、出版社需人工登录、PDF 需人工确认下载入口、经典论文无公开全文但可能有机构访问、多版本无法判断优先、候选论文质量不足需调整主题/阶段。
+
+- **状态**：push 记 `status=user_action_required`（`errorCode=AUTH_REQUIRED / USER_RESOURCE_NEEDED / MANUAL_PDF_NEEDED / VERSION_CHOICE / TOPIC_DECISION` 等）；**不得**把 `AUTH_REQUIRED / USER_RESOURCE_NEEDED` 误记为 `FULLTEXT_UNAVAILABLE`（record 强制校验）。
+- **查看/完成待办**：
+  ```sh
+  node bin/dsh-literature-actions.mjs list                 # 五要素清单
+  node bin/dsh-literature-actions.mjs resolve <actionId>   # 处理完成后标记
+  ```
+  CARSI 重新登录成功（`dsh-literature-carsi-login`）会自动 resolve 所有 `carsi_relogin` 待办。
+- **从原步骤继续（不重新检索/评分）**：候选、评分、selection 轨迹、fetch 尝试都已持久化。
+  ```sh
+  node bin/dsh-literature-push.mjs --resume <pushId>
+  ```
+  agent 调用 `literature_resume(pushId)` 得到 resumeFrom（sources/selection/fetch_pdf/fulltext_index/report/record）与待办清单后继续。
+- **手动下载 PDF**：`literature_fetch_pdf(manualPdfPath=<路径>)` 校验（%PDF-/大小）→ sha256 → 入库（source=manual，非 OA）。
+
+## CARSI 机构授权全文兜底（可选 provider）
+
+公开/OA 链（arXiv → OpenAlex OA → Unpaywall → Crossref 出版社链接）**全部失败**、且论文已通过 ranking 质量门时，`literature_fetch_pdf` 可经 `allowCarsi=true` 最后尝试 **CARSI 机构授权**（`https://ds.carsi.edu.cn`）。
+
+- **非 OA**：provenance 记录 `source=carsi`、`access_type=institutional`、`is_open_access=false`；PDF 只进私人文献库，不标记 OA、不对外发布。
+- **独立浏览器 profile**：`~/.local/share/dsh-literature/browser-profile/`（`launchPersistentContext`），**绝不读取/复制日常浏览器 Cookie**。
+- **首次认证（一次性）**：
+  ```sh
+  pnpm build
+  node bin/dsh-literature-carsi-login.mjs         # headed 登录，完成后按 Enter
+  node bin/dsh-literature-carsi-login.mjs --check # 会话检查
+  ```
+- **状态**：`PDF_OK`（机构授权下载成功）/ `AUTH_REQUIRED`（会话失效——**不进入 cooldown**，提示重新登录）/ `ACCESS_DENIED` / `PDF_NOT_FOUND` / `FULLTEXT_UNAVAILABLE`。`AUTH_REQUIRED` 的 push 记 `status=auth_required`、`errorCode=AUTH_REQUIRED`。
+- **严格低频**：`carsi.enabled`（默认开）、`maxPerPush=1`、`minIntervalMinutes=120`；preflight 不探测 CARSI；不批量抓取。
+- **下载验证**：HTTP 成功 → Content-Type（可得时）→ `%PDF-` 文件头 → 非 HTML 登录页 → 最小体积 → sha256。
+- 依赖：`playwright`（npm）+ `npx playwright install chromium`（用户缓存，非系统级）；未安装时 provider 自动降级禁用。
 
 ## 安装
 

@@ -55,7 +55,7 @@ export interface PaperRef {
   metadataSource: string
 }
 
-export type PdfLicense = 'oa' | 'author' | 'publisher'
+export type PdfLicense = 'oa' | 'author' | 'publisher' | 'institutional'
 
 export interface PdfCandidate {
   url: string

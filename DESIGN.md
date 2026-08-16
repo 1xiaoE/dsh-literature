@@ -21,20 +21,32 @@
 ├── schema.sql                              # SQLite schema（与 db.ts 迁移一致）
 ├── cordis.patch.yml                        # 挂载补丁（web/headless 共用）
 ├── bin/
-│   └── dsh-literature-push.mjs             # headless CLI 包装（OS cron 调用）
+│   ├── dsh-literature-push.mjs             # headless CLI 包装（OS cron 调用；--resume 恢复）
+│   ├── dsh-literature-carsi-login.mjs      # CARSI 人工登录 / 会话检查 CLI（独立 profile；成功后自动 resolve carsi 待办）
+│   └── dsh-literature-actions.mjs          # NEED_USER_ACTION 待办 list / resolve CLI
 ├── src/
 │   ├── index.ts                            # plugin: name/inject/apply/Config
-│   ├── config.ts                           # Config schema（主题/阶段/排名权重/路径）
-│   ├── db.ts                               # node:sqlite 打开 + 迁移（user_version）
+│   ├── config.ts                           # Config schema（主题/阶段/排名权重/路径/CARSI）
+│   ├── db.ts                               # node:sqlite 打开 + 迁移（user_version，现 v9）
 │   ├── sources/
 │   │   ├── types.ts                        # SourceAdapter 统一接口 + Candidate/Metadata 类型
 │   │   ├── arxiv.ts                        # 适配器：arXiv（预印本 + 开放 PDF）
 │   │   ├── openalex.ts                     # 适配器：OpenAlex（metadata/citation/venue/OA location）
 │   │   ├── crossref.ts                     # 适配器：Crossref（DOI metadata fallback）
-│   │   └── registry.ts                     # 适配器注册/选择/合并去重
+│   │   └── registry.ts                     # 适配器注册/选择/合并去重（arxiv→openalex→unpaywall→crossref）
+│   ├── providers/
+│   │   ├── types.ts                        # PdfProvider 接口 + ProviderResult（AUTH_REQUIRED 等）
+│   │   └── carsi.ts                        # CARSI 机构授权 provider（浏览器/会话/登录墙/验证/低频门）
 │   ├── fetch/
-│   │   ├── pdf.ts                          # 多源 fallback 下载 + sha256 + 结果记录
+│   │   ├── pdf.ts                          # 多源 fallback（公开链 → providers → 终态）+ sha256 + 溯源
 │   │   └── fulltext.ts                     # pdftotext → 分块纯文本 → SQLite
+│   ├── lib/
+│   │   ├── paths.ts                        # XDG data 路径解析
+│   │   ├── history.ts                      # 去重/已读查询
+│   │   ├── stages.ts                       # 阶段进度（target_papers 门控）
+│   │   ├── ranking.ts                      # 确定性 pre-ranking（权重配置化）
+│   │   ├── report.ts                       # 报告归档到文献库子目录
+│   │   └── user_actions.ts                 # NEED_USER_ACTION 待办（open/resolve/五要素）
 │   ├── tools/
 │   │   ├── literature_sources.ts           # tool：候选检索（结构化 JSON）
 │   │   ├── literature_fetch_pdf.ts         # tool：PDF 多源下载
@@ -54,7 +66,9 @@
 ├── literature.db                          # SQLite (WAL)
 ├── pdfs/<sha256>.pdf                      # 按内容哈希
 ├── cache/<adapter>/<query>.json           # 检索缓存
-└── fulltext/<paper_id>/<seq>.txt          # 分块全文（或存 SQLite，见 schema）
+├── fulltext/<paper_id>/<seq>.txt          # 分块全文（或存 SQLite，见 schema）
+├── browser-profile/                       # CARSI 独立持久浏览器 profile（绝不触碰日常 profile）
+└── carsi/session.json                     # CARSI 会话/低频账本（lastAuthAt/lastAttemptAt/outcome）
 ```
 
 ## 2. V0.1 闭环与数据流
@@ -132,6 +146,31 @@ interface SourceAdapter {
 - **priority knowledge goal**：= 阶段 knowledgeGoals 顺序中第一个未覆盖 goal（Fundamentals 顺序：balance_stability → impedance_compliance → template_dynamics → contact_force → whole_body）。候选带 `priorityGoalMatch`，进入预排序权重 `priorityGoal`（0.1）；agent curriculum 排序同样对 priority goal 匹配显著加权——不绕过质量门。
 - **curated landmark seeds**（仅检索/课程锚点，不绕过任何门槛）：Fundamentals 配置 2 颗——VMC（Pratt 2001，goals: impedance_compliance + balance_stability）、Instantaneous Capture Input（Pratt 2006，goals: template_dynamics + balance_stability）。seeds 无条件进入 landmark 池（landmark_confidence=1，curriculum hint 下限 0.75），其标题作为 landmark 检索锚查询；无全文时不强制选择，可扩展相关候选。
 
+## 3e. CARSI 机构授权全文兜底（V0.4，可选 provider）
+
+- **定位**：公开/OA 链（arxiv → openalex OA → unpaywall → crossref publisher）全部失败后、仅对**已过 ranking 质量门**的论文，经 `literature_fetch_pdf(allowCarsi=true)` 最后尝试 CARSI（`ds.carsi.edu.cn`）。CARSI **不是 OA 源**：provenance `source=carsi / access_type=institutional / is_open_access=false`，PDF 仅进私人文献库。
+- **架构**：独立 `PdfProvider` 层（`src/providers/types.ts` + `src/providers/carsi.ts`），`fetch/pdf.ts` 只做通用编排（公开候选 → providers 链 → 终态）；CARSI 特例（浏览器驱动、登录墙检测、会话账本、低频门）全部在 provider 内，不散落。
+- **浏览器会话**：独立持久 profile `~/.local/share/dsh-literature/browser-profile/`（`launchPersistentContext`），**不读取/复制日常浏览器 Cookie 库**；首次认证用 `bin/dsh-literature-carsi-login.mjs` headed 人工登录，后续 headless 复用；失效返回 `AUTH_REQUIRED`（≠ FULLTEXT_UNAVAILABLE）。
+- **状态机（DB v7）**：fetch_log outcome 扩展 `PDF_OK / AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND`（表重建扩 CHECK）+ `access_type / is_open_access` 溯源列；pushes status 增加 `auth_required`（表重建）。**cooldown 仅 FULLTEXT_UNAVAILABLE**；AUTH_REQUIRED 永不 cooldown，提示重新登录。
+- **下载验证（req 5）**：HTTP 成功 → Content-Type（可得时）→ `%PDF-` magic → 非 HTML 登录页 → ≥ minPdfBytes → sha256 落盘 `pdfs/<sha256>.pdf`。
+- **严格低频**：`carsi.{enabled,maxPerPush:1,minIntervalMinutes:120}` + provider 会话账本（`carsi/session.json`）；preflight 不探测 CARSI；每会话一篇论文；不批量抓取。
+- **依赖**：`playwright`（npm，动态 import）+ `npx playwright install chromium`（~/.cache/ms-playwright，非系统级）；缺失时 provider 自动降级。
+
+## 3f. Human-in-the-loop（NEED_USER_ACTION，V0.4）
+
+- **触发**：资源访问/认证/权限/下载渠道/研究选择问题且用户比自动化更容易解决时——不盲目重试、不直接判失败。典型：CARSI 失效、出版社需人工登录、PDF 需人工确认入口、经典论文无公开全文但可能有机构访问、多版本无法判断、候选质量不足需调整主题/阶段。
+- **状态机（DB v8）**：`pushes.status` 增加 `user_action_required`（CHECK 扩展，表重建）；新表 `user_actions`（step/kind/state open|resolved/issue/attempts/what_user_should_do/how_to_continue）。open 时 push 置 `user_action_required`（errorCode=NEED_USER_ACTION）；全部 resolve 后自动回 `running`。**record 强制校验**：`user_action_required` 必须有 open 待办；`errorCode=AUTH_REQUIRED` 只允许 `auth_required`/`user_action_required`——**禁止把 AUTH_REQUIRED / USER_RESOURCE_NEEDED 误记为 FULLTEXT_UNAVAILABLE**。
+- **恢复**：`literature_resume(pushId)` 只读汇报卡点/待办（五要素）+ `resumeFrom`（sources/selection/fetch_pdf/fulltext_index/report/record，纯函数 `inferResumeFrom` 推断）。候选、评分、selection 轨迹、fetch_log 全部持久化——**恢复不重新检索、不重新评分**；唯一例外是用户自己决定调整主题（kind=topic_decision → sources，属用户驱动的重检索而非盲目重试）。
+- **用户渠道**：`bin/dsh-literature-actions.mjs list|resolve`（五要素 CLI）；`dsh-literature-carsi-login` 成功后自动 resolve 所有 `carsi_relogin` 待办；`bin/dsh-literature-push.mjs --resume <pushId>` 恢复 headless 推送。手动下载的 PDF 经 `literature_fetch_pdf(manualPdfPath)` 登记（校验 + sha256，source=manual，非 OA）。
+- **修复**：`literature_fulltext_index` 现在接受 `PDF_OK`（CARSI/manual 下载的 PDF 可建全文索引）。
+
+## 3g. V0.1 correctness 收口（DB v9）
+
+- **priority_goal_match 写入修复**：此前 `literature_sources` 的 candidate INSERT/UPDATE 不含 `priority_goal_match` 列——preRank 计算并消费了该信号（权重 `ranking.priorityGoal`，默认 0.1），但**从未写入 SQLite**，DB 恒为 DEFAULT 0。修复：INSERT + ON CONFLICT UPDATE 均写入。
+- **匹配强度数值化**：`priorityGoalMatchScore(text, goal)` 返回 0~1 强度（0.35/命中概念，封顶 1.0），替代原 0/1 布尔；`preRank` 按数值消费权重。DB v9 将 `candidates.priority_goal_match` 重建为 `REAL NOT NULL DEFAULT 0`（旧 0/1 数据无损保留）。
+- **keyword 概念映射补全**：`gait_representation` 增 `gait synthesis / gait pattern / gait cycle / footstep / step-to-step`；`impedance_compliance` 增 `impedance control / compliance control / stiffness control / damper / spring / spring-damper / force position compliance`（此前 Paredes & Hereid 2022 的 "footstep location" 无法命中 gait 概念）。
+- **全文阅读 coverage provenance**：`literature_record`（completed）计算并持久化到 pushes：`total_chunks`（indexed chunk 数）、`read_chunks`（fulltext_reads distinct seq）、`read_coverage`、`coverage_basis`（`full_read` 全部 read；`index_exposed` 未读 chunk 的 preview 已由 `literature_fulltext_index` 暴露——报告必须如实写 M/N，**禁止** read_coverage<1 时声称"全部精读"；`read_log` 无 index）。push_now 指令要求报告记录四字段。
+
 ## 4. 两阶段 Ranking（调整 3）与 Stage Relevance（约束）
 
 - 每个阶段带 `StageDef`：`label` / `scope` / `preferredKeywords` / `downweightKeywords` / `excludeKeywords`。
@@ -183,11 +222,13 @@ interface SourceAdapter {
 | 工具 | 输入 | 输出 | 备注 |
 |---|---|---|---|
 | `literature_sources` | topic, years?, limit? | 候选 JSON（含评分字段） | 调 registry；做 pre-ranking 标注 |
-| `literature_fetch_pdf` | paper_id | {pdf_path, sha256, source, outcome} | 多源 fallback；后台可选项（V0.1 同步） |
-| `literature_fulltext_index` | paper_id | 章节/分块索引 | pdftotext 后分块 |
+| `literature_fetch_pdf` | paper_id, allowCarsi?, manualPdfPath? | {pdf_path, sha256, source, outcome} | 多源 fallback → CARSI → 手动 PDF；AUTH_REQUIRED 等 |
+| `literature_fulltext_index` | paper_id | 章节/分块索引 | pdftotext 后分块；接受 ok/PDF_OK |
 | `literature_fulltext_read` | paper_id, section/range | 有界纯文本 | token 安全 |
-| `literature_record` | push 结果 | 写库 + 阶段推进 | 幂等 |
+| `literature_record` | push 结果 | 写库 + 阶段推进 | 幂等；HITL 状态强校验 |
 | `literature_push_now` | — | 工作流指令（阶段化） | 无 LLM；headless agent 执行 |
+| `literature_user_action` | open/resolve + 五要素 | actionId/状态 | NEED_USER_ACTION 注册/完成 |
+| `literature_resume` | pushId | 卡点/待办/resumeFrom/指令 | 断点恢复，不重新检索/评分 |
 
 ## 8. Harness 接入（调整 7）
 

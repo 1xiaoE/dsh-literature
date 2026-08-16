@@ -22,7 +22,7 @@ describe('sqlite migration', () => {
     migrate(db)
     migrate(db)
     const row = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(row.user_version).toBe(6)
+    expect(row.user_version).toBe(9)
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>
@@ -70,12 +70,22 @@ describe('v6 topic alias migration', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-alias-'))
     const db = new DatabaseSync(join(dir, 'alias.db'))
     // minimal pre-v6 schema so legacy rows exist before the migration runs
+    // (pushes carries the full v6 column set so the v7 rebuild can copy it)
     db.exec(
       `CREATE TABLE pushes (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
          topic TEXT NOT NULL,
          stage INTEGER NOT NULL DEFAULT 1,
          status TEXT NOT NULL DEFAULT 'running'
+                CHECK (status IN ('running','completed','failed','no_candidate','fulltext_unavailable')),
+         started_at TEXT NOT NULL DEFAULT (datetime('now')),
+         finished_at TEXT,
+         error_code TEXT,
+         error_detail TEXT,
+         paper_id TEXT,
+         report_path TEXT,
+         model_route TEXT,
+         notes TEXT
        );
        CREATE TABLE stages (
          topic TEXT PRIMARY KEY,

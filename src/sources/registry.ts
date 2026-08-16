@@ -274,14 +274,18 @@ export class SourceRegistry {
   }
 }
 
-/** Build the V0.2 registry with the three shipped adapters. */
+/** Build the registry with the shipped adapters, in fetch-chain order:
+ * arxiv → openalex (OA location) → unpaywall → crossref (publisher links),
+ * i.e. public/OA sources strictly before publisher links; institutional
+ * providers (CARSI) are appended by the fetch pipeline only after ALL of
+ * these have failed. */
 export function createRegistry(opts: RegistryOptions = {}): SourceRegistry {
   const registry = new SourceRegistry(opts)
   registry.register(new ArxivAdapter(opts.fetchImpl, opts.timeoutMs))
   registry.register(new OpenAlexAdapter(opts.fetchImpl, opts.timeoutMs, opts.mailto))
-  registry.register(new CrossrefAdapter(opts.fetchImpl, opts.timeoutMs))
   registry.register(
     new UnpaywallAdapter(opts.unpaywallEmail ?? 'dsh-literature@example.org', opts.fetchImpl, opts.timeoutMs),
   )
+  registry.register(new CrossrefAdapter(opts.fetchImpl, opts.timeoutMs))
   return registry
 }

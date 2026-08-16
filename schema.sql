@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS pushes (
   topic          TEXT NOT NULL,
   stage          INTEGER NOT NULL DEFAULT 1,
   status         TEXT NOT NULL DEFAULT 'running'
-                 CHECK (status IN ('running','completed','failed','no_candidate','fulltext_unavailable')),
+                 CHECK (status IN ('running','completed','failed','no_candidate','fulltext_unavailable','auth_required','user_action_required')),
   started_at     TEXT NOT NULL DEFAULT (datetime('now')),
   finished_at    TEXT,
   error_code     TEXT,
@@ -34,8 +34,32 @@ CREATE TABLE IF NOT EXISTS pushes (
   paper_id       TEXT,                            -- picked paper (FK enforced at app level)
   report_path    TEXT,
   model_route    TEXT,                            -- provenance: {provider,model} if harness exposes it
-  notes          TEXT
+  notes          TEXT,
+  total_chunks   INTEGER,                         -- full-text reading coverage provenance
+  read_chunks    INTEGER,
+  read_coverage  REAL,
+  coverage_basis TEXT CHECK (coverage_basis IS NULL OR coverage_basis IN ('full_read','index_exposed','read_log'))
 );
+
+-- Human-in-the-loop (NEED_USER_ACTION): five-part issue record per push.
+-- state='open' → the workflow is parked and needs the user; 'resolved' → the
+-- user finished, the push can be resumed from the original step.
+CREATE TABLE IF NOT EXISTS user_actions (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id            INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id           TEXT REFERENCES papers(id) ON DELETE CASCADE,
+  step               TEXT NOT NULL,   -- where the workflow is stuck (sources/selection/preflight/fetch_pdf/fulltext_index/report/record)
+  kind               TEXT NOT NULL,   -- carsi_relogin | manual_pdf | version_choice | topic_decision | user_resource_needed | ...
+  state              TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','resolved')),
+  issue              TEXT NOT NULL,   -- what resource/permission/info is missing
+  attempts           TEXT,            -- JSON array: what has already been tried
+  what_user_should_do TEXT NOT NULL,
+  how_to_continue    TEXT NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_actions_push ON user_actions(push_id);
+CREATE INDEX IF NOT EXISTS idx_user_actions_state ON user_actions(state);
 
 CREATE TABLE IF NOT EXISTS candidates (
   push_id              INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
@@ -52,7 +76,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   curriculum_value      REAL,                      -- agent-assigned
   agent_rank            INTEGER,                   -- agent semantic ranking position (final_score order)
   preflight_attempt_order INTEGER,                 -- order in which preflight was attempted
-  priority_goal_match   INTEGER NOT NULL DEFAULT 0,
+  priority_goal_match   REAL NOT NULL DEFAULT 0,   -- priority-goal match STRENGTH 0..1 (deterministic)
   selection_outcome     TEXT,                      -- SELECTED | FULLTEXT_UNAVAILABLE | BELOW_QUALITY_GATE | PDF_FAILED
   selection_rejection_reason TEXT,
   landmark_confidence   REAL,
@@ -70,14 +94,16 @@ CREATE TABLE IF NOT EXISTS candidates (
 );
 
 CREATE TABLE IF NOT EXISTS fetch_log (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  paper_id   TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
-  attempts   TEXT NOT NULL,                       -- JSON: [{source,url,status,http}]
-  outcome    TEXT NOT NULL CHECK (outcome IN ('ok','FULLTEXT_UNAVAILABLE','failed')),
-  pdf_path   TEXT,
-  pdf_source TEXT,                                -- provenance: winning URL + license
-  sha256     TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id       TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  attempts       TEXT NOT NULL,                       -- JSON: [{source,url,status,http,detail}]
+  outcome        TEXT NOT NULL CHECK (outcome IN ('ok','PDF_OK','AUTH_REQUIRED','ACCESS_DENIED','PDF_NOT_FOUND','FULLTEXT_UNAVAILABLE','failed')),
+  pdf_path       TEXT,
+  pdf_source     TEXT,                                -- provenance: winning URL + license
+  sha256         TEXT,
+  access_type    TEXT CHECK (access_type IS NULL OR access_type IN ('oa','institutional')),  -- provenance (req 1)
+  is_open_access INTEGER,                             -- provenance: 0 for institutional (CARSI)
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS fulltexts (
@@ -135,4 +161,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 6;
+PRAGMA user_version = 9;

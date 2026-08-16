@@ -16,6 +16,8 @@ import { defineLiteratureFulltextIndex } from './tools/literature_fulltext_index
 import { defineLiteratureFulltextRead } from './tools/literature_fulltext_read.js'
 import { defineLiteratureRecord } from './tools/literature_record.js'
 import { defineLiteraturePushNow } from './tools/literature_push_now.js'
+import { defineLiteratureUserAction } from './tools/literature_user_action.js'
+import { defineLiteratureResume } from './tools/literature_resume.js'
 
 export const name = 'dsh-literature'
 export const inject = ['tools']
@@ -60,6 +62,8 @@ export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
     defineLiteratureFulltextRead(getRt),
     defineLiteratureRecord(getRt, modelRoute),
     defineLiteraturePushNow(getRt, modelRoute),
+    defineLiteratureUserAction(getRt),
+    defineLiteratureResume(getRt),
   ]) {
     ctx.tools.register(tool)
   }

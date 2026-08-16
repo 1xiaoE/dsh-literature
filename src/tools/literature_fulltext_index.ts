@@ -66,7 +66,7 @@ export function defineLiteratureFulltextIndex(getRt: () => LiteratureRuntime) {
       const fetchRow = rt.db
         .prepare(
           `SELECT pdf_path FROM fetch_log
-           WHERE paper_id = ? AND outcome = 'ok' ORDER BY id DESC LIMIT 1`,
+           WHERE paper_id = ? AND outcome IN ('ok', 'PDF_OK') ORDER BY id DESC LIMIT 1`,
         )
         .get(args.paperId) as { pdf_path: string | null } | undefined
 

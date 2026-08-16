@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 9
 
 export type Db = DatabaseSync
 
@@ -14,7 +14,14 @@ export interface PushRow {
   id: number
   topic: string
   stage: number
-  status: 'running' | 'completed' | 'failed' | 'no_candidate' | 'fulltext_unavailable'
+  status:
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'no_candidate'
+    | 'fulltext_unavailable'
+    | 'auth_required'
+    | 'user_action_required'
   started_at: string
   finished_at: string | null
   error_code: string | null
@@ -230,6 +237,166 @@ CREATE TABLE IF NOT EXISTS stages (
     db.exec(
       "DELETE FROM stages WHERE topic IN ('足式机器人控制', 'legged robot control', 'legged robot') AND topic != 'legged_robot_control'",
     )
+  }
+  if (version < 7) {
+    // CARSI institutional-access fallback:
+    // - fetch_log: new terminal outcomes (PDF_OK / AUTH_REQUIRED / ACCESS_DENIED /
+    //   PDF_NOT_FOUND) + provenance columns (access_type / is_open_access);
+    // - pushes: new terminal status 'auth_required' (distinct from
+    //   fulltext_unavailable — a broken institutional session needs a re-login
+    //   prompt, NOT a permanent paper-level cooldown).
+    // SQLite cannot alter CHECK constraints, so both tables are rebuilt.
+    db.exec('PRAGMA foreign_keys = OFF')
+    try {
+      db.exec(`
+CREATE TABLE fetch_log_new (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id       TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  attempts       TEXT NOT NULL,
+  outcome        TEXT NOT NULL CHECK (outcome IN ('ok','PDF_OK','AUTH_REQUIRED','ACCESS_DENIED','PDF_NOT_FOUND','FULLTEXT_UNAVAILABLE','failed')),
+  pdf_path       TEXT,
+  pdf_source     TEXT,
+  sha256         TEXT,
+  access_type    TEXT CHECK (access_type IS NULL OR access_type IN ('oa','institutional')),
+  is_open_access INTEGER,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT INTO fetch_log_new (id, paper_id, attempts, outcome, pdf_path, pdf_source, sha256, created_at)
+  SELECT id, paper_id, attempts, outcome, pdf_path, pdf_source, sha256, created_at FROM fetch_log;
+DROP TABLE fetch_log;
+ALTER TABLE fetch_log_new RENAME TO fetch_log;
+
+CREATE TABLE pushes_new (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic          TEXT NOT NULL,
+  stage          INTEGER NOT NULL DEFAULT 1,
+  status         TEXT NOT NULL DEFAULT 'running'
+                 CHECK (status IN ('running','completed','failed','no_candidate','fulltext_unavailable','auth_required')),
+  started_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at    TEXT,
+  error_code     TEXT,
+  error_detail   TEXT,
+  paper_id       TEXT,
+  report_path    TEXT,
+  model_route    TEXT,
+  notes          TEXT
+);
+INSERT INTO pushes_new (id, topic, stage, status, started_at, finished_at, error_code, error_detail, paper_id, report_path, model_route, notes)
+  SELECT id, topic, stage, status, started_at, finished_at, error_code, error_detail, paper_id, report_path, model_route, notes FROM pushes;
+DROP TABLE pushes;
+ALTER TABLE pushes_new RENAME TO pushes;
+`)
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON')
+    }
+  }
+  if (version < 8) {
+    // Human-in-the-loop (NEED_USER_ACTION):
+    // - pushes gain the generic 'user_action_required' terminal (a resource /
+    //   auth / permission / download-channel / research-choice problem that
+    //   the USER can solve more easily than the automation — never blind
+    //   retries, never misreported as FULLTEXT_UNAVAILABLE);
+    // - user_actions stores the five-part issue record (where stuck / what's
+    //   missing / what was tried / what the user should do / how to continue)
+    //   so a resumed workflow can continue from the original step without
+    //   re-running retrieval and scoring.
+    db.exec('PRAGMA foreign_keys = OFF')
+    try {
+      db.exec(`
+CREATE TABLE pushes_new (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic          TEXT NOT NULL,
+  stage          INTEGER NOT NULL DEFAULT 1,
+  status         TEXT NOT NULL DEFAULT 'running'
+                 CHECK (status IN ('running','completed','failed','no_candidate','fulltext_unavailable','auth_required','user_action_required')),
+  started_at     TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at    TEXT,
+  error_code     TEXT,
+  error_detail   TEXT,
+  paper_id       TEXT,
+  report_path    TEXT,
+  model_route    TEXT,
+  notes          TEXT
+);
+INSERT INTO pushes_new (id, topic, stage, status, started_at, finished_at, error_code, error_detail, paper_id, report_path, model_route, notes)
+  SELECT id, topic, stage, status, started_at, finished_at, error_code, error_detail, paper_id, report_path, model_route, notes FROM pushes;
+DROP TABLE pushes;
+ALTER TABLE pushes_new RENAME TO pushes;
+
+CREATE TABLE IF NOT EXISTS user_actions (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  push_id            INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id           TEXT REFERENCES papers(id) ON DELETE CASCADE,
+  step               TEXT NOT NULL,   -- where the workflow is stuck (sources/selection/preflight/fetch_pdf/fulltext_index/report/record)
+  kind               TEXT NOT NULL,   -- carsi_relogin | manual_pdf | version_choice | topic_decision | user_resource_needed | ...
+  state              TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','resolved')),
+  issue              TEXT NOT NULL,   -- what resource/permission/info is missing
+  attempts           TEXT,            -- JSON array: what has already been tried
+  what_user_should_do TEXT NOT NULL,
+  how_to_continue    TEXT NOT NULL,
+  created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_actions_push ON user_actions(push_id);
+CREATE INDEX IF NOT EXISTS idx_user_actions_state ON user_actions(state);
+`)
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON')
+    }
+  }
+  if (version < 9) {
+    // V0.1 correctness closeout:
+    // - candidates.priority_goal_match: INTEGER → REAL (0..1 match strength;
+    //   the value is now actually written by literature_sources — previously
+    //   the column existed but was never inserted, so it stayed DEFAULT 0);
+    // - pushes gains full-text reading coverage provenance columns
+    //   (total_chunks / read_chunks / read_coverage / coverage_basis) so a
+    //   completed push's report can state the exact coverage basis.
+    const cols = (db.prepare('PRAGMA table_info(candidates)').all() as Array<{ name: string }>).map((c) => c.name)
+    const colDef = (name: string): string => {
+      switch (name) {
+        case 'push_id':
+          return 'INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE'
+        case 'paper_id':
+          return 'TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE'
+        case 'priority_goal_match':
+          return 'REAL NOT NULL DEFAULT 0'
+        case 'candidate_pool':
+          return "TEXT NOT NULL DEFAULT 'recent' CHECK (candidate_pool IN ('recent','landmark'))"
+        case 'picked':
+        case 'fulltext_available':
+        case 'is_seen':
+          return 'INTEGER NOT NULL DEFAULT 0'
+        default:
+          return ''
+      }
+    }
+    const quoted = cols.map((c) => `"${c}"`)
+    db.exec('PRAGMA foreign_keys = OFF')
+    try {
+      db.exec(
+        `CREATE TABLE candidates_new (
+  ${cols.map((c) => `  "${c}" ${colDef(c)}`).join(',\n')},
+  PRIMARY KEY (push_id, paper_id)
+);`,
+      )
+      db.exec(
+        `INSERT INTO candidates_new (${quoted.join(',')})
+         SELECT ${quoted.join(',')} FROM candidates;`,
+      )
+      db.exec('DROP TABLE candidates;')
+      db.exec('ALTER TABLE candidates_new RENAME TO candidates;')
+      const pushCols = db.prepare('PRAGMA table_info(pushes)').all() as Array<{ name: string }>
+      const add = (name: string, ddl: string): void => {
+        if (!pushCols.some((c) => c.name === name)) db.exec(`ALTER TABLE pushes ADD COLUMN ${ddl};`)
+      }
+      add('total_chunks', 'total_chunks INTEGER')
+      add('read_chunks', 'read_chunks INTEGER')
+      add('read_coverage', 'read_coverage REAL')
+      add('coverage_basis', "coverage_basis TEXT CHECK (coverage_basis IS NULL OR coverage_basis IN ('full_read','index_exposed','read_log'))")
+    } finally {
+      db.exec('PRAGMA foreign_keys = ON')
+    }
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

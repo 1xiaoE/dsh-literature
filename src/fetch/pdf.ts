@@ -1,28 +1,60 @@
 /**
- * PDF acquisition with multi-source fallback. Tries every candidate from
- * every adapter in order; records the attempt trail. When no candidate
- * yields a valid PDF the outcome is FULLTEXT_UNAVAILABLE — never a fake
- * success.
+ * PDF acquisition with multi-source fallback. Tries every public/open-access
+ * candidate from every adapter in order, then — only when all of them failed —
+ * the registered PdfProviders (e.g. the CARSI institutional-access provider)
+ * in registration order. Records the attempt trail in fetch_log with
+ * provenance (source / access_type / is_open_access). When nothing yields a
+ * valid PDF the outcome is FULLTEXT_UNAVAILABLE or a provider terminal
+ * (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND) — never a fake success.
+ *
+ * Provider specifics (browser driving, session state, login-wall detection)
+ * live in src/providers/*; this module only knows the PdfProvider interface.
  */
 import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
+import { access, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Db } from '../db.js'
-import type { PdfCandidate } from '../sources/types.js'
+import type { PaperRef, PdfCandidate } from '../sources/types.js'
+import type { PdfProvider, ProviderResult } from '../providers/types.js'
+
+export type FetchOutcome =
+  | 'ok' // public/open-access candidate
+  | 'PDF_OK' // institutional provider success
+  | 'AUTH_REQUIRED'
+  | 'ACCESS_DENIED'
+  | 'PDF_NOT_FOUND'
+  | 'FULLTEXT_UNAVAILABLE'
+  | 'failed'
+
+export type FetchAttemptStatus =
+  | 'ok'
+  | 'http_error'
+  | 'not_pdf'
+  | 'too_small'
+  | 'network_error'
+  | 'skipped'
+  | 'auth_required'
+  | 'access_denied'
+  | 'not_found'
 
 export interface FetchAttempt {
   source: string
   url: string
-  status: 'ok' | 'http_error' | 'not_pdf' | 'too_small' | 'network_error' | 'skipped'
+  status: FetchAttemptStatus
   http?: number
+  /** provider reason (e.g. login-wall message) when applicable */
+  detail?: string
 }
 
 export interface FetchResult {
-  outcome: 'ok' | 'FULLTEXT_UNAVAILABLE' | 'failed'
+  outcome: FetchOutcome
   pdfPath?: string
   sha256?: string
   pdfSource?: string
+  /** provenance: 'oa' | 'institutional' (requirement 1) */
+  accessType?: 'oa' | 'institutional'
+  isOpenAccess?: boolean
   attempts: FetchAttempt[]
 }
 
@@ -53,16 +85,38 @@ async function download(url: string, timeoutMs: number, fetchImpl: typeof fetch)
   }
 }
 
+/** Map a provider result to an attempt-trail entry. */
+function attemptOfProvider(name: string, r: ProviderResult): FetchAttempt {
+  const status: FetchAttemptStatus =
+    r.outcome === 'PDF_OK'
+      ? 'ok'
+      : r.outcome === 'AUTH_REQUIRED'
+        ? 'auth_required'
+        : r.outcome === 'ACCESS_DENIED'
+          ? 'access_denied'
+          : 'not_found'
+  return { source: name, url: r.url ?? '-', status, http: r.http, detail: r.reason }
+}
+
 /**
- * Download the first valid PDF from the candidate list, record the attempt
- * trail in fetch_log, and store the file as pdfs/<sha256>.pdf.
+ * Download the first valid PDF from the public candidate list; when every
+ * candidate fails, fall back to the registered providers (CARSI etc.) in
+ * order. Records the attempt trail + provenance in fetch_log and stores the
+ * file as pdfs/<sha256>.pdf.
  */
 export async function fetchPdf(
   db: Db,
   paperId: string,
   candidates: PdfCandidate[],
   pdfsDir: string,
-  opts: { timeoutMs?: number; minPdfBytes?: number; fetchImpl?: typeof fetch } = {},
+  opts: {
+    timeoutMs?: number
+    minPdfBytes?: number
+    fetchImpl?: typeof fetch
+    providers?: PdfProvider[]
+    /** paper record; required when providers are used (they resolve URLs from it) */
+    paper?: PaperRef
+  } = {},
 ): Promise<FetchResult> {
   const timeoutMs = opts.timeoutMs ?? 30000
   const minBytes = opts.minPdfBytes ?? 10240
@@ -82,17 +136,12 @@ export async function fetchPdf(
       mkdirSync(pdfsDir, { recursive: true })
       await writeFile(pdfPath, buf)
       attempts.push({ source: c.source, url: c.url, status: 'ok' })
-      const result: FetchResult = {
-        outcome: 'ok',
-        pdfPath,
-        sha256,
-        pdfSource: `${c.url} (license: ${c.license})`,
-        attempts,
-      }
+      const pdfSource = `${c.url} (license: ${c.license})`
       db.prepare(
-        'INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, pdf_source, sha256) VALUES (?, ?, ?, ?, ?, ?)',
-      ).run(paperId, JSON.stringify(attempts), 'ok', pdfPath, result.pdfSource ?? null, sha256)
-      return result
+        `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, pdf_source, sha256, access_type, is_open_access)
+         VALUES (?, ?, 'ok', ?, ?, ?, 'oa', 1)`,
+      ).run(paperId, JSON.stringify(attempts), pdfPath, pdfSource, sha256)
+      return { outcome: 'ok', pdfPath, sha256, pdfSource, accessType: 'oa', isOpenAccess: true, attempts }
     } catch (err) {
       const e = err as { message?: string; name?: string }
       attempts.push({
@@ -104,17 +153,81 @@ export async function fetchPdf(
             : e?.name === 'AbortError'
               ? 'network_error'
               : 'http_error',
+        http: /HTTP (\d+)/.exec(e?.message ?? '')?.[1] ? Number(/HTTP (\d+)/.exec(e?.message ?? '')![1]) : undefined,
       })
     }
   }
 
-  const result: FetchResult = { outcome: 'FULLTEXT_UNAVAILABLE', attempts }
+  // ---- all public candidates failed: provider chain (e.g. CARSI) ----
+  for (const provider of opts.providers ?? []) {
+    const gate = provider.shouldAttempt()
+    if (!gate.ok) {
+      attempts.push({ source: provider.name, url: '-', status: 'skipped', detail: gate.reason })
+      continue
+    }
+    const result: ProviderResult = await provider.fetch(
+      opts.paper ?? ({ id: paperId } as PaperRef),
+      { pdfsDir, timeoutMs, minPdfBytes: minBytes },
+    )
+    attempts.push(attemptOfProvider(provider.name, result))
+
+    if (result.outcome === 'PDF_OK' && result.pdfPath && result.sha256) {
+      // defense-in-depth: the provider claims success — verify the file exists
+      try {
+        await access(result.pdfPath)
+      } catch {
+        attempts.push({
+          source: provider.name,
+          url: result.url ?? '-',
+          status: 'not_found',
+          detail: 'provider 报告 PDF_OK 但文件不存在',
+        })
+        continue
+      }
+      const pdfSource = `${provider.name}: ${result.url ?? result.pdfPath} (license: ${provider.accessType})`
+      db.prepare(
+        `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, pdf_source, sha256, access_type, is_open_access)
+         VALUES (?, ?, 'PDF_OK', ?, ?, ?, ?, ?)`,
+      ).run(
+        paperId,
+        JSON.stringify(attempts),
+        result.pdfPath,
+        pdfSource,
+        result.sha256,
+        provider.accessType,
+        provider.isOpenAccess ? 1 : 0,
+      )
+      return {
+        outcome: 'PDF_OK',
+        pdfPath: result.pdfPath,
+        sha256: result.sha256,
+        pdfSource,
+        accessType: provider.accessType,
+        isOpenAccess: provider.isOpenAccess,
+        attempts,
+      }
+    }
+  }
+
+  // ---- terminal outcome ----
+  const providerTerminal = (opts.providers ?? []).length > 0
+    ? strongestProviderFailure(attempts)
+    : undefined
+  const outcome: FetchOutcome = providerTerminal ?? 'FULLTEXT_UNAVAILABLE'
   db.prepare('INSERT INTO fetch_log (paper_id, attempts, outcome) VALUES (?, ?, ?)').run(
     paperId,
     JSON.stringify(attempts),
-    'FULLTEXT_UNAVAILABLE',
+    outcome,
   )
-  return result
+  return { outcome, attempts }
+}
+
+/** Strongest provider failure among the attempt trail (AUTH > DENIED > NOT_FOUND). */
+function strongestProviderFailure(attempts: FetchAttempt[]): FetchOutcome | undefined {
+  if (attempts.some((a) => a.status === 'auth_required')) return 'AUTH_REQUIRED'
+  if (attempts.some((a) => a.status === 'access_denied')) return 'ACCESS_DENIED'
+  if (attempts.some((a) => a.status === 'not_found')) return 'PDF_NOT_FOUND'
+  return undefined
 }
 
 export interface PreflightProbe {
@@ -130,9 +243,12 @@ export interface PreflightResult {
 }
 
 /**
- * Cheap full-text availability preflight: probes each candidate with a
+ * Cheap full-text availability preflight: probes each PUBLIC candidate with a
  * bounded fetch (up to probeBytes, then abort) and checks the PDF magic.
  * No file is written — the real download happens only for the selected paper.
+ * Providers (CARSI) are deliberately NOT probed here: institutional access is
+ * decided at fetch time only (strict low frequency, no browser sessions in
+ * the selection loop).
  */
 export async function preflightPdf(
   candidates: PdfCandidate[],
@@ -192,6 +308,10 @@ export async function preflightPdf(
  * Retry cooldown: latest FULLTEXT_UNAVAILABLE outcome for a paper, if it is
  * within the TTL window, returns the ISO timestamp until which retries are
  * suppressed; otherwise null.
+ *
+ * AUTH_REQUIRED is deliberately NOT a cooldown source (requirement 6): a
+ * broken/expired institutional session must surface as a re-login prompt, not
+ * as a paper-level permanent block.
  */
 export function inRetryCooldown(db: Db, paperId: string, cooldownHours: number): string | null {
   if (!cooldownHours || cooldownHours <= 0) return null

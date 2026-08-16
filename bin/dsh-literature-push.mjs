@@ -9,9 +9,13 @@
  *
  * Usage:
  *   node bin/dsh-literature-push.mjs [--topic <topic>] [--install] [--harness <dir>]
+ *   node bin/dsh-literature-push.mjs --resume <pushId> [--install] [--harness <dir>]
  *
  * --install  ensures the plugin is installed into the headless profile
  *            (dsh plugin --profile headless add link:<repo>) before running.
+ * --resume   continues a parked push (NEED_USER_ACTION / interrupted) from
+ *            its original step — candidates and scores are reused, never
+ *            re-retrieved/re-scored.
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
@@ -25,16 +29,18 @@ const HARNESS =
 const HEADLESS_PROFILE = join(homedir(), '.dsh', 'profiles', 'headless')
 
 function parseArgs(argv) {
-  const out = { topic: undefined, install: false, harness: HARNESS }
+  const out = { topic: undefined, install: false, harness: HARNESS, resume: undefined }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (a === '--topic') out.topic = argv[++i]
+    else if (a === '--resume') out.resume = Number(argv[++i])
     else if (a === '--install') out.install = true
     else if (a === '--harness') out.harness = argv[++i]
     else if (a === '--help') {
       console.log(
         'dsh-literature-push: run one literature push via the dsh headless profile.\n' +
           '  --topic <topic>   override topic\n' +
+          '  --resume <pushId> continue a parked/interrupted push from its original step\n' +
           '  --install         ensure plugin installed in the headless profile first\n' +
           '  --harness <dir>   dsh harness repo (default: ' + HARNESS + ')',
       )
@@ -81,8 +87,30 @@ function buildTaskPrompt(topic) {
     '先查历史避免重复推荐，遵循阅读阶段主线递进）。\n' +
     '2) 按 literature_push_now 返回的 instructions 逐步执行：检索→语义排序精选1篇→下载PDF→分块全文精读→' +
     '撰写结构化 Markdown 精读报告并归档到文献库→用 literature_record 提交结果。\n' +
-    '3) 若全文不可得（FULLTEXT_UNAVAILABLE），如实以 status=fulltext_unavailable 结束，禁止凭摘要伪装精读。\n' +
-    '完成后用不超过 5 句话汇报：推送号、选中论文、报告路径、阶段进度。'
+    '3) Human-in-the-loop（NEED_USER_ACTION）规则：遇到资源访问/认证/权限/下载渠道/研究选择问题且用户更容易解决时，' +
+    '不要盲目重试、不要直接判定失败——用 literature_user_action(open) 注册待办（五要素：卡在哪步/缺什么/试过什么/用户做什么/如何继续），' +
+    '再用 literature_record 提交 status=user_action_required（errorCode=AUTH_REQUIRED 等），并在汇报中完整展示五要素；' +
+    '用户处理后可运行 --resume 恢复。禁止把 AUTH_REQUIRED / USER_RESOURCE_NEEDED 误记为 FULLTEXT_UNAVAILABLE。\n' +
+    '4) 若全文不可得且不属于上述 HITL 场景（FULLTEXT_UNAVAILABLE），如实以 status=fulltext_unavailable 结束，禁止凭摘要伪装精读。\n' +
+    '完成后用不超过 5 句话汇报：推送号、选中论文、报告路径、阶段进度（若为 NEED_USER_ACTION 则汇报五要素与恢复命令）。'
+  )
+}
+
+function buildResumePrompt(pushId) {
+  return (
+    '恢复文献推送 workflow（Literature Agent）。pushId=' +
+    pushId +
+    '。\n' +
+    '步骤：1) 调用 literature_resume(pushId=' +
+    pushId +
+    ') 获取卡点、待办与 resumeFrom 步骤。\n' +
+    '2) 若返回 openActions（NEED_USER_ACTION 待办）：先明确展示五要素（卡在哪步/缺什么/试过什么/用户做什么/如何继续），' +
+    '并说明「用户处理完成后重新运行 dsh-literature-push.mjs --resume ' +
+    pushId +
+    '」；若待办已解决（用户已处理），按其 howToContinue 继续。\n' +
+    '3) 不要重新运行 literature_sources、不要重新评分——候选与评分已持久化；严格按 resumeFrom 指示的步骤继续' +
+    '（fetch_pdf 可用 allowCarsi=true 或 manualPdfPath；fulltext_index → literature_fulltext_read 逐块精读 → 报告 → literature_record）。\n' +
+    '完成后用不超过 5 句话汇报：恢复的步骤、最终状态、报告路径（或仍待用户处理的事项）。'
   )
 }
 
@@ -95,9 +123,12 @@ function main() {
   if (args.install || !pluginInstalled()) {
     installPlugin(args.harness)
   }
-  const topic = args.topic ?? '足式机器人控制'
-  const prompt = buildTaskPrompt(topic)
-  console.error(`[dsh-literature] running headless push for topic: ${topic}`)
+  const prompt = args.resume !== undefined
+    ? buildResumePrompt(args.resume)
+    : buildTaskPrompt(args.topic ?? '足式机器人控制')
+  console.error(
+    `[dsh-literature] running headless ${args.resume !== undefined ? `resume of push #${args.resume}` : `push for topic: ${args.topic ?? '足式机器人控制'}`}`,
+  )
   const res = spawnSync(
     process.execPath,
     ['--import', 'tsx/esm', dshBin(args.harness), '--profile', 'headless', prompt],
