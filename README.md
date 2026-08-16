@@ -1,137 +1,184 @@
-# dsh-literature — Literature Agent for DeepSeek Harness
+# dsh-literature
 
-按周期自动检索、筛选、下载、分块精读、总结与归档**科研论文**的 Harness 插件。V0.1 主题：足式机器人控制。
+An AI-assisted literature reading and recommendation workflow built around DeepSeek Harness, with staged curriculum learning, multi-source retrieval, verified full-text reading, knowledge-gap-aware ranking, and structured research notes.
 
-## 设计要点
+This repository is a **pure plugin / workflow source repository**: it contains no personal reading library, no runtime data, and no credentials. All runtime data lives locally under `~/.local/share/dsh-literature/` (see [Runtime Data](#runtime-data)).
 
-- **模型无关**：插件代码**不调用任何 LLM、不写死模型 id**。智能环节（语义排序、全文理解、报告撰写）由 Harness 路由的 agent（DeepSeek 或 OpenAI 均可）完成；插件只提供确定性基础设施。
-- **数据/代码分离**：代码在本仓库；运行数据在 `~/.local/share/dsh-literature/`（SQLite、PDF、缓存），不进入 git。
-- **可安装/可卸载插件**：通过 `dsh plugin --profile <name> add link:<repo>` 安装，不修改 Harness core。
-- **headless 优先**：周期推送由 OS cron/systemd 调用 `bin/dsh-literature-push.mjs`，走官方 headless profile 完成一次完整流程后退出。
+## Features
 
-## 闭环
+- **Multi-source retrieval** — arXiv, OpenAlex, Crossref (metadata), Unpaywall (legal-OA locations)
+- **RecentPool + LandmarkPool** — year-windowed recent candidates and year-unconstrained, eligibility-scored landmark candidates (curated seeds supported)
+- **Deterministic pre-ranking** — recency / impact / topic similarity / full-text availability / stage relevance / knowledge-gap / priority-goal signals with configurable weights
+- **Batch agent semantic ranking** — one-shot (at most two) LLM calls score the whole Top-15 candidate table; no per-paper LLM fan-out
+- **Stage relevance** — keyword-guided stage fit hint + agent score, with a hard gate
+- **Curriculum value** — agent-assessed learning value per stage, with a hard gate
+- **Priority knowledge goal** — first uncovered goal of the stage drives retrieval weighting
+- **requiredGoals stage gate** — a stage graduates only when required goals are actually covered (e.g. Fundamentals requires template_dynamics + balance_stability + impedance_compliance), never by paper count alone
+- **Legal full-text verification** — PDFs validated by HTTP status, Content-Type, `%PDF-` magic, non-HTML login-page rejection, minimum size, and sha256
+- **Chunked full-text reading** — pdftotext → bounded chunks → token-safe indexed reading, never a whole paper in context
+- **Reading coverage provenance** — `total_chunks / read_chunks / read_coverage / coverage_basis` per completed push
+- **SQLite provenance** — papers, candidates (full scoring trace), fetch log, fulltexts+chunks, retrievals (query provenance + auth mode), pushes (per-phase timings), stages, user actions
+- **Human-in-the-loop** — resource/auth/permission problems park the push with a five-part user action record and resume from the original step (deterministic 0-LLM finalize when everything but the user action is done)
+- **OpenAlex API key via environment variable** — optional but recommended (`OPENALEX_API_KEY`), never stored or logged
+- **arXiv rate limiting** — serial scheduler (≥3.1s between requests), request-level dedup, 429 circuit breaker
+- **Optional institutional full-text fallback (CARSI)** — note: institutional access ≠ open access; CARSI results are private-library only, never marked as OA
+- **Headless execution** — OS cron / systemd friendly CLI, no GUI required
+
+## Architecture
 
 ```
-topic → search → deduplicate → pre-rank(Top 8-12) → agent rank(Top 1) → PDF(多源回退)
-      → fulltext index → chunked read → analyze → report → history
+topic → search (Recent + Landmark pools) → dedupe → deterministic pre-rank (Top 15)
+      → batch agent semantic ranking (Top 10) → quality gates (stage + curriculum)
+      → full-text preflight → PDF (public/OA chain → optional CARSI) → verified download
+      → chunked full-text index → bounded reads → structured report (plugin-owned canonical write)
+      → literature_record (provenance + stage progression) → history
 ```
 
-- 全文**绝不一次性**进入上下文：`literature_fulltext_index` 返回章节索引，`literature_fulltext_read` 按块读取。
-- 全文不可得时如实记录 `FULLTEXT_UNAVAILABLE`，禁止凭摘要伪装精读。
-- 阶段契合门控：`stage_relevance_score` 低于阈值（默认 0.6）的论文不可选为 Top 1；阶段推进只统计符合当前阶段的论文。
+- **Model-agnostic by construction** — the plugin never calls an LLM itself; all intelligent steps (semantic ranking, full-text analysis, report writing) are executed by the harness-routed agent. No model ids are hardcoded.
+- **Data/code separation** — code lives in this repo; runtime data lives in the XDG data dir.
+- **Plugin boundary** — installs as a DeepSeek Harness plugin (`dsh plugin --profile <name> add link:<repo>`); the DeepSeek Harness core is never modified.
 
-## 工具
+## Requirements
 
-| 工具 | 作用 |
+- Node.js >= 22.19
+- pnpm
+- `pdftotext` (poppler-utils) on PATH
+- A DeepSeek Harness checkout (external; not bundled here)
+- Optional: `playwright` + Chromium for the CARSI institutional fallback
+
+## Installation
+
+```sh
+git clone https://github.com/1xiaoE/dsh-literature.git
+cd dsh-literature
+pnpm install
+```
+
+Install into a DeepSeek Harness profile (web and/or headless):
+
+```sh
+dsh plugin --profile web add link:/path/to/dsh-literature
+dsh plugin --profile headless add link:/path/to/dsh-literature
+```
+
+## Configuration
+
+Configuration is provided via the plugin row config (cordis patch). See `cordis.patch.yml` and `DESIGN.md` for the full schema: topics, reading stages (scope/keywords/knowledge goals/required goals/landmark seeds), ranking weights, retrieval pools, thresholds, full-text parser, HTTP timeouts, and the optional `carsi` block.
+
+### OpenAlex API key (optional but recommended)
+
+```sh
+export OPENALEX_API_KEY='YOUR_KEY'
+```
+
+`OPENALEX_API_KEY` is optional but recommended — without it OpenAlex runs in anonymous mode (`openalex_auth_mode=anonymous`). The key is read from the environment only; it is never written to source, logs, SQLite, or Git. Check your quota with:
+
+```sh
+node bin/dsh-literature-openalex-status.mjs
+```
+
+A `.env.example` is provided as a template; never commit a real `.env`.
+
+## Usage
+
+One complete push (recommended paper selection + full-text reading + report):
+
+```sh
+node bin/dsh-literature-push.mjs --topic "足式机器人控制"
+```
+
+Resume a parked or interrupted push from its original step (0-LLM deterministic finalize when possible):
+
+```sh
+node bin/dsh-literature-push.mjs --resume <pushId>
+```
+
+Human-in-the-loop actions:
+
+```sh
+node bin/dsh-literature-actions.mjs list            # pending user actions (five-part record)
+node bin/dsh-literature-actions.mjs resolve <id>    # mark one resolved
+```
+
+CARSI institutional login (optional fallback; first-time setup):
+
+```sh
+node bin/dsh-literature-carsi-login.mjs
+```
+
+## Curriculum
+
+Reading proceeds through configurable stages, each with:
+
+- scope, preferred/downweight/exclude keywords
+- knowledge goals (coverage-gated stage progression)
+- `requiredGoals` — goals that MUST be covered before the stage graduates
+- curated landmark seeds as retrieval anchors
+- per-stage curriculum weight
+
+When `papers_in_stage >= target - 1` and a required goal is still uncovered, the stage enters **required-goal completion mode**: the priority goal is pinned to the pending required goal, and only a paper whose full text genuinely covers it (agent judgment, not keyword hits) can graduate the stage.
+
+## Retrieval Sources
+
+| Source | Role |
 |---|---|
-| `literature_push_now` | 创建推送并返回分步工作流指令 |
-| `literature_sources` | 多源检索 + 确定性预排序（权重可配置） |
-| `literature_fetch_pdf` | PDF 多源回退下载（sha256 + 溯源；CARSI 兜底；manualPdfPath 手动登记） |
-| `literature_fulltext_index` | pdftotext → 分块 → 索引 |
-| `literature_fulltext_read` | 按块读取（token 安全） |
-| `literature_record` | 状态/评分追溯/阶段门控推进 |
-| `literature_user_action` | Human-in-the-loop：注册/完成 NEED_USER_ACTION 待办（五要素） |
-| `literature_resume` | 从原步骤恢复被暂停/中断的推送（不重新检索/评分） |
+| arXiv | preprint candidates + open PDFs (serial scheduler, dedup, 429 breaker) |
+| OpenAlex | metadata, citations, venue, OA locations, relevance scores (API key via env) |
+| Crossref | DOI metadata completion + publisher links |
+| Unpaywall | legal-OA locations for DOI-carrying papers |
+| CARSI (optional) | institutional full-text fallback — **institutional access ≠ open access**, private library only |
 
-## Human-in-the-loop（NEED_USER_ACTION）
+## Full-text Handling
 
-遇到**资源访问 / 认证 / 权限 / 下载渠道 / 研究选择**问题、且你比自动化更容易解决时，流程**不会盲目重试、也不会直接判失败**——进入 `NEED_USER_ACTION` 状态并明确告知五要素：
+- PDF acquisition order: arXiv / OA location → Unpaywall → publisher links → (optional) CARSI → `FULLTEXT_UNAVAILABLE`
+- Every download is verified (HTTP / Content-Type / `%PDF-` magic / non-HTML / size / sha256)
+- Full text is extracted with pdftotext, split into bounded chunks, and read back chunk-by-chunk (token-safe)
+- Reading coverage (`total_chunks / read_chunks / read_coverage / coverage_basis`) is recorded per push; a report must never claim "read everything" when `read_coverage < 1`
 
-1. 卡在哪一步（step）
-2. 缺少什么资源/权限/信息（issue）
-3. 已尝试过哪些方法（attempts）
-4. 你需要做什么（whatUserShouldDo）
-5. 完成后如何继续（howToContinue）
+## Human-in-the-loop
 
-典型场景：CARSI/学校认证失效、出版社需人工登录、PDF 需人工确认下载入口、经典论文无公开全文但可能有机构访问、多版本无法判断优先、候选论文质量不足需调整主题/阶段。
+When the workflow hits a resource / auth / permission / download-channel / research-choice problem that the user can solve more easily than the automation, it:
 
-- **状态**：push 记 `status=user_action_required`（`errorCode=AUTH_REQUIRED / USER_RESOURCE_NEEDED / MANUAL_PDF_NEEDED / VERSION_CHOICE / TOPIC_DECISION` 等）；**不得**把 `AUTH_REQUIRED / USER_RESOURCE_NEEDED` 误记为 `FULLTEXT_UNAVAILABLE`（record 强制校验）。
-- **查看/完成待办**：
-  ```sh
-  node bin/dsh-literature-actions.mjs list                 # 五要素清单
-  node bin/dsh-literature-actions.mjs resolve <actionId>   # 处理完成后标记
-  ```
-  CARSI 重新登录成功（`dsh-literature-carsi-login`）会自动 resolve 所有 `carsi_relogin` 待办。
-- **从原步骤继续（不重新检索/评分）**：候选、评分、selection 轨迹、fetch 尝试都已持久化。
-  ```sh
-  node bin/dsh-literature-push.mjs --resume <pushId>
-  ```
-  agent 调用 `literature_resume(pushId)` 得到 resumeFrom（sources/selection/fetch_pdf/fulltext_index/report/record）与待办清单后继续。
-- **手动下载 PDF**：`literature_fetch_pdf(manualPdfPath=<路径>)` 校验（%PDF-/大小）→ sha256 → 入库（source=manual，非 OA）。
+1. parks the push in `user_action_required` with a five-part record (where stuck / what's missing / what was tried / what to do / how to continue),
+2. never misreports `AUTH_REQUIRED` / `USER_RESOURCE_NEEDED` as `FULLTEXT_UNAVAILABLE`,
+3. resumes from the original step after the user is done — reusing persisted candidates, scores, selection trail and fetch log; a deterministic finalize path completes pushes with `resume_llm_call_count = 0` when nothing else is pending.
 
-## CARSI 机构授权全文兜底（可选 provider）
+## Runtime Data
 
-公开/OA 链（arXiv → OpenAlex OA → Unpaywall → Crossref 出版社链接）**全部失败**、且论文已通过 ranking 质量门时，`literature_fetch_pdf` 可经 `allowCarsi=true` 最后尝试 **CARSI 机构授权**（`https://ds.carsi.edu.cn`）。
+All runtime state stays local (never committed):
 
-- **非 OA**：provenance 记录 `source=carsi`、`access_type=institutional`、`is_open_access=false`；PDF 只进私人文献库，不标记 OA、不对外发布。
-- **独立浏览器 profile**：`~/.local/share/dsh-literature/browser-profile/`（`launchPersistentContext`），**绝不读取/复制日常浏览器 Cookie**。
-- **首次认证（一次性）**：
-  ```sh
-  pnpm build
-  node bin/dsh-literature-carsi-login.mjs         # headed 登录，完成后按 Enter
-  node bin/dsh-literature-carsi-login.mjs --check # 会话检查
-  ```
-- **状态**：`PDF_OK`（机构授权下载成功）/ `AUTH_REQUIRED`（会话失效——**不进入 cooldown**，提示重新登录）/ `ACCESS_DENIED` / `PDF_NOT_FOUND` / `FULLTEXT_UNAVAILABLE`。`AUTH_REQUIRED` 的 push 记 `status=auth_required`、`errorCode=AUTH_REQUIRED`。
-- **严格低频**：`carsi.enabled`（默认开）、`maxPerPush=1`、`minIntervalMinutes=120`；preflight 不探测 CARSI；不批量抓取。
-- **下载验证**：HTTP 成功 → Content-Type（可得时）→ `%PDF-` 文件头 → 非 HTML 登录页 → 最小体积 → sha256。
-- 依赖：`playwright`（npm）+ `npx playwright install chromium`（用户缓存，非系统级）；未安装时 provider 自动降级禁用。
-
-## 安装
-
-```sh
-# web profile（GUI 会话内使用）
-dsh plugin --profile web add link:/home/eternal/dsh-literature
-# headless profile（cron 推送用）
-dsh plugin --profile headless add link:/home/eternal/dsh-literature
+```
+~/.local/share/dsh-literature/
+├── literature.db          # SQLite (papers, candidates, fetch log, fulltexts, pushes, stages, user actions)
+├── pdfs/<sha256>.pdf      # downloaded PDFs, content-hashed
+├── cache/                 # adapter caches
+├── reports/               # canonical reading reports
+└── browser-profile/       # CARSI persistent browser profile (never your daily browser)
 ```
 
-卸载：`dsh plugin --profile <name> rm dsh-literature`
-
-## 周期推送（OS cron）
+## Development
 
 ```sh
-# 每 2 天 09:00
-0 9 */2 * * /usr/bin/env DSH_HARNESS_DIR=/home/eternal/deepseek-harness node /home/eternal/dsh-literature/bin/dsh-literature-push.mjs --install >> ~/.local/share/dsh-literature/push.log 2>&1
-```
-
-## 配置（插件行 config，cordis patch 覆盖）
-
-```yaml
-- insert:
-    - id: literature
-      name: 'dsh-literature'
-      config:
-        topics: ['足式机器人控制']
-        libraryRoot: '~/Desktop/文献阅读'
-        targetPapersPerStage: 3
-        preRankTopN: 10
-        ranking: { recency: 0.15, impact: 0.15, topicSimilarity: 0.2, fulltextAvailability: 0.2, stageRelevance: 0.3 }
-        agentRanking: { relevance: 0.4, learningValue: 0.3, representativeness: 0.2, novelty: 0.1 }
-```
-
-## 开发
-
-```sh
-pnpm build       # tsc 构建到 lib/
 pnpm typecheck
+pnpm build       # tsc → lib/
 pnpm test        # vitest
 ```
 
-## 数据
+## Tests
 
-`~/.local/share/dsh-literature/`
-- `reports/` — canonical 精读报告（Desktop 导出由外层脚本/Zotero 处理）
-- `literature.db` — papers / candidates（评分追溯）/ fetch_log / fulltexts+chunks / pushes / stages
-- `pdfs/<sha256>.pdf` — 按内容哈希
-- `cache/` — 检索缓存
-- `push.log` — cron 日志
+The suite covers: PDF fallback chains, fulltext chunking, ranking/pre-ranking, stage gates, graduation rules (requiredGoals), priority-goal matching, HITL lifecycle + resume, report writer + deterministic finalize, OpenAlex auth isolation (host-env safe), arXiv scheduler/dedup/429, SQLite migrations (fresh init to current version), and a strict lossless-JSON boundary for every tool output.
 
-## 路线图
+## Current Status
 
-- [x] V0.1：闭环 + headless CLI + SQLite 溯源
-- [x] V0.2：Literature Query Planner
-- [x] V0.3：curriculum_value / knowledge coverage 门控 / Top-K 全文预检选择 / landmark seeds
-- [x] V0.3 收口：selection 语义拆分（agent_rank vs preflight_attempt_order）+ SELECTED 不变式 / priority-goal 知识缺口引导 / curated seeds 锚点（topic 规范化 / stage 感知查询 / Recent+Landmark 双池 / 检索溯源 / 离题过滤）
-- [ ] GUI 内后台任务（ctx.jobs）与定时面板
-- [ ] Semantic Scholar 适配器
-- [ ] Zotero 同步（Linux/Windows）
+- **V0.1** — stable feature set as described above; the project is a workflow/plugin source repository, not a standalone application.
+
+## Roadmap
+
+- Zotero integration
+- More retrieval sources
+- GUI scheduling inside the Harness web shell
+- PDF vision understanding
+
+## License
+
+License not specified yet.

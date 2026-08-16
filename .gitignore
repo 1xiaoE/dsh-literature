@@ -1,4 +1,40 @@
+# --- dependencies & build ---
 node_modules/
 /lib/
+dist/
+coverage/
 *.tsbuildinfo
+
+# --- runtime data (stays local: ~/.local/share/dsh-literature) ---
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+reports/
+pdfs/
+cache/
+
+# --- secrets / credentials ---
+.env
+.env.*
+!.env.example
+cookies*
+Cookies*
+session*
+credentials*
+auth*
+*.log
+
+# --- browsers (CARSI institutional fallback) ---
+browser-profile/
+browser_profile/
+user-data-dir/
+
+# --- documents / private reading library ---
+*.pdf
+
+# --- OS ---
 .DS_Store
+Thumbs.db
