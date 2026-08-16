@@ -36,7 +36,10 @@ export interface RecordScoreEntry {
 
 export interface SelectionEntry {
   paperId: string
-  rank: number
+  /** agent semantic ranking position of this paper (agent_rank) */
+  agentRank: number
+  /** order in which this paper was preflight-attempted (1-based) */
+  attemptOrder: number
   outcome: SelectionOutcome
   reason?: string
 }
@@ -113,13 +116,15 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       },
       selection: {
         type: 'array',
-        description: '全文预检选择轨迹：按语义排名依次尝试的每篇论文的结果',
+        description:
+          '全文预检选择轨迹：每篇被尝试的论文记录 agentRank（语义排名）与 attemptOrder（预检顺序，1 起连续）。不变式：SELECTED 出现后不得再有更高 attemptOrder 的条目；每 push 至多一个 SELECTED。',
         items: {
           type: 'object',
           additionalProperties: false,
           properties: {
             paperId: { type: 'string', required: true },
-            rank: { type: 'integer', required: true },
+            agentRank: { type: 'integer', required: true, description: 'agent 语义排名（1 = 最高）' },
+            attemptOrder: { type: 'integer', required: true, description: '预检尝试顺序（1-based，连续）' },
             outcome: {
               type: 'string',
               required: true,
@@ -200,20 +205,56 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         }
       }
 
-      // --- selection trail ---
+      // --- selection trail (invariant-enforced) ---
       if (args.selection && args.selection.length > 0) {
+        const sorted = [...args.selection].sort((a, b) => a.attemptOrder - b.attemptOrder)
+        const orders = sorted.map((s) => s.attemptOrder)
+        for (let i = 0; i < orders.length; i += 1) {
+          if (orders[i] !== i + 1) {
+            throw new Error(`attemptOrder 必须从 1 连续递增：${JSON.stringify(orders)}`)
+          }
+        }
+        const selectedCount = sorted.filter((s) => s.outcome === 'SELECTED').length
+        if (selectedCount > 1) {
+          throw new Error('invariant: 每个 push 至多一个 SELECTED')
+        }
+        const selectedIdx = sorted.findIndex((s) => s.outcome === 'SELECTED')
+        if (selectedIdx !== -1 && selectedIdx !== sorted.length - 1) {
+          throw new Error(
+            'invariant: SELECTED 出现后不得再对更低排名候选执行 preflight/download',
+          )
+        }
         const updateSel = db.prepare(
-          `UPDATE candidates SET selection_rank = ?, selection_outcome = ?, selection_rejection_reason = ?
+          `UPDATE candidates SET agent_rank = ?, preflight_attempt_order = ?,
+             selection_outcome = ?, selection_rejection_reason = ?
            WHERE push_id = ? AND paper_id = ?`,
         )
-        for (const s of args.selection) {
-          updateSel.run(s.rank, s.outcome, s.reason ?? null, args.pushId, s.paperId)
+        for (const s of sorted) {
+          updateSel.run(s.agentRank, s.attemptOrder, s.outcome, s.reason ?? null, args.pushId, s.paperId)
         }
+      }
+
+      // --- agent_rank for scored candidates WITHOUT an explicit selection rank ---
+      if (args.scores && args.scores.length > 0) {
+        db.exec(
+          `UPDATE candidates SET agent_rank = (
+             SELECT 1 + COUNT(*) FROM candidates c2
+             WHERE c2.push_id = candidates.push_id AND c2.final_score > candidates.final_score
+           ) WHERE push_id = ${args.pushId} AND final_score IS NOT NULL AND agent_rank IS NULL`,
+        )
       }
 
       // --- quality gates: picked paper must pass stage AND curriculum ---
       let stageMatched = false
       if (args.status === 'completed' && args.paperId) {
+        if (args.selection) {
+          const pickedSel = args.selection.find((s) => s.paperId === args.paperId)
+          if (!pickedSel || pickedSel.outcome !== 'SELECTED') {
+            throw new Error(
+              `picked 论文 ${args.paperId} 必须在其 selection 条目中标记为 SELECTED（当前：${pickedSel?.outcome ?? '缺失'}）`,
+            )
+          }
+        }
         const row = db
           .prepare(
             'SELECT stage_relevance_score, curriculum_value FROM candidates WHERE push_id = ? AND paper_id = ?',

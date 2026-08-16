@@ -85,7 +85,8 @@ pnpm test        # vitest
 
 - [x] V0.1：闭环 + headless CLI + SQLite 溯源
 - [x] V0.2：Literature Query Planner
-- [x] V0.3：curriculum_value / knowledge coverage 门控 / Top-K 全文预检选择 / landmark seeds（topic 规范化 / stage 感知查询 / Recent+Landmark 双池 / 检索溯源 / 离题过滤）
+- [x] V0.3：curriculum_value / knowledge coverage 门控 / Top-K 全文预检选择 / landmark seeds
+- [x] V0.3 收口：selection 语义拆分（agent_rank vs preflight_attempt_order）+ SELECTED 不变式 / priority-goal 知识缺口引导 / curated seeds 锚点（topic 规范化 / stage 感知查询 / Recent+Landmark 双池 / 检索溯源 / 离题过滤）
 - [ ] GUI 内后台任务（ctx.jobs）与定时面板
 - [ ] Semantic Scholar 适配器
 - [ ] Zotero 同步（Linux/Windows）

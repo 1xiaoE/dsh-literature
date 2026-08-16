@@ -11,6 +11,7 @@ import { rowToRef } from './literature_sources.js'
 
 export interface FetchPdfInput {
   paperId: string
+  pushId?: number
 }
 
 export interface FetchPdfOutput {
@@ -30,6 +31,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
       '多源回退下载论文 PDF（arXiv → OpenAlex OA → Crossref 出版社链接），落盘到数据目录并记录 sha256 与来源溯源；全部失败时 outcome=FULLTEXT_UNAVAILABLE。',
     parameters: {
       paperId: { type: 'string', required: true, description: '候选论文 id（来自 literature_sources）' },
+      pushId: { type: 'integer', description: '推送号；提供时执行 SELECTED 不变式检查' },
     },
     output: {
       schema: {
@@ -80,6 +82,22 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
     },
     async execute(args: FetchPdfInput): Promise<FetchPdfOutput> {
       const rt = getRt()
+      if (args.pushId !== undefined) {
+        const selected = rt.db
+          .prepare(
+            "SELECT paper_id FROM candidates WHERE push_id = ? AND selection_outcome = 'SELECTED'",
+          )
+          .all(args.pushId) as Array<{ paper_id: string }>
+        const selOther = selected.find((s) => s.paper_id !== args.paperId)
+        if (selOther) {
+          return {
+            paperId: args.paperId,
+            outcome: 'failed',
+            attempts: [],
+            reason: `invariant: push #${args.pushId} 已 SELECTED ${selOther.paper_id}；禁止对更低排名候选执行下载`,
+          }
+        }
+      }
       const row = getPaper(rt.db, args.paperId)
       if (!row) {
         return {

@@ -45,7 +45,7 @@ describe('ranking', () => {
 
     const zeroWeights = {
       ...cfg,
-      ranking: { recency: 0, impact: 0, topicSimilarity: 0, fulltextAvailability: 0, stageRelevance: 0, knowledgeGap: 0 },
+      ranking: { recency: 0, impact: 0, topicSimilarity: 0, fulltextAvailability: 0, stageRelevance: 0, knowledgeGap: 0, priorityGoal: 0 },
     }
     const zero = preRank(
       { title: 'Legged Robot Control via MPC', year: now, citations: 500, fulltextAvailable: true },

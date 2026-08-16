@@ -26,7 +26,7 @@ import {
 import { currentYear, type TopicDef } from '../config.js'
 import { seenPaperIds, startPush } from '../lib/history.js'
 import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
-import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility } from '../lib/planner.js'
+import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility, matchSeed, firstUncoveredGoal } from '../lib/planner.js'
 import type { PaperRef, PlannedQuery } from '../sources/types.js'
 import { canonicalId } from '../sources/types.js'
 import { mergeWithLabels, type RetrievalProvenance } from '../sources/registry.js'
@@ -52,6 +52,7 @@ export interface SourcesOutput {
   curriculumValueThreshold: number
   coveredGoals: string[]
   uncoveredGoals: Array<{ id: string; label: string }>
+  priorityGoal?: { id: string; label: string }
   queriesGenerated: Array<{ text: string; kind: string; pool: string }>
   rawCount: number
   dedupedCount: number
@@ -86,6 +87,7 @@ export interface SourcesOutput {
     landmarkConfidence: number
     knowledgeGapHint: number
     knowledgeGapGoals: string[]
+    priorityGoalMatch: boolean
     retrieval: Array<{ source: string; query: string; score?: number }>
     rankHint: number
   }>
@@ -179,6 +181,11 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           stageRelevanceThreshold: { type: 'number', required: true },
           curriculumValueThreshold: { type: 'number', required: true },
           coveredGoals: { type: 'array', items: { type: 'string' }, required: true },
+          priorityGoal: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { id: { type: 'string', required: true }, label: { type: 'string', required: true } },
+          },
           uncoveredGoals: {
             type: 'array',
             required: true,
@@ -243,6 +250,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 landmarkConfidence: { type: 'number', required: true },
                 knowledgeGapHint: { type: 'number', required: true },
                 knowledgeGapGoals: { type: 'array', items: { type: 'string' }, required: true },
+                priorityGoalMatch: { type: 'boolean', required: true },
                 retrieval: {
                   type: 'array',
                   required: true,
@@ -362,7 +370,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         const sr = def
           ? stageRelevanceHint(text, def)
           : { score: 0.5, excluded: false, matchedPreferred: [], matchedDownweight: [] }
-        const ch = curriculumHint(text, paper.venue)
+        const seedMatch = Boolean(def && matchSeed(paper, def.landmarkSeeds))
+        const chRaw = curriculumHint(text, paper.venue)
+        // curated seeds are curriculum anchors: floor their curriculum hint
+        const ch = seedMatch ? { score: Math.max(chRaw.score, 0.75), reasons: [...chRaw.reasons, 'curated-seed'] } : chRaw
         const gap = knowledgeGapHint(text, uncoveredGoals)
         const el = landmarkEligibility(
           { citations: paper.citations, venue: paper.venue, stageHint: sr.score, stageMatched: sr.matchedPreferred.length },
@@ -373,10 +384,12 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           stageHint: sr.score,
           impact: paper.citations !== undefined ? Math.min(1, Math.log10(paper.citations + 1) / 3) : 0,
           venue: paper.venue ? 1 : 0,
-          seedMatch: (def?.landmarkSeeds ?? []).some((seed) =>
-            seed === paper.doi || seed === paper.arxivId || paper.title.toLowerCase().includes(seed.toLowerCase()),
-          ),
+          seedMatch,
         })
+        const priorityGoal = def ? firstUncoveredGoal(def, covered) : undefined
+        const priorityGoalMatch = priorityGoal
+          ? knowledgeGapHint(text, [priorityGoal]).matched.length > 0
+          : false
         const pre = preRank(
           {
             title: paper.title,
@@ -386,6 +399,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             fulltextAvailable: quickPdfAvailability(paper),
             stageRelevance: sr.score,
             knowledgeGap: uncoveredGoals.length > 0 ? gap.score / uncoveredGoals.length : 0,
+            priorityGoalMatch: priorityGoalMatch ? 1 : 0,
           },
           cfg,
           now,
@@ -445,6 +459,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         curriculumValueThreshold: cfg.curriculumValueThreshold,
         coveredGoals: [...covered],
         uncoveredGoals: uncoveredGoals.map((g) => ({ id: g.id, label: g.label })),
+        priorityGoal: (() => {
+          const pg = def ? firstUncoveredGoal(def, covered) : undefined
+          return pg ? { id: pg.id, label: pg.label } : undefined
+        })(),
         queriesGenerated: [...recentQueries, ...landmarkQueries].map((q) => ({
           text: q.text,
           kind: q.kind,
@@ -457,8 +475,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         negativeDropped,
         offTopicDropped,
         total: rows.length,
-        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, isSeen, prov }, i) =>
-          clean({
+        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, isSeen, prov }, i) => {
+          const pg = def ? firstUncoveredGoal(def, covered) : undefined
+          const pgMatch = pg ? knowledgeGapHint(`${paper.title} ${paper.abstract ?? ''}`, [pg]).matched.length > 0 : false
+          return clean({
             paperId: canonicalId(paper),
             title: paper.title,
             year: paper.year,
@@ -484,6 +504,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             landmarkConfidence: landmarkConf,
             knowledgeGapHint: uncoveredGoals.length > 0 ? gapGoals.length / uncoveredGoals.length : 0,
             knowledgeGapGoals: gapGoals,
+            priorityGoalMatch: pgMatch,
             retrieval: prov.map((p) =>
               clean({
                 source: p.source,
@@ -492,8 +513,8 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
               }),
             ),
             rankHint: i + 1,
-          }),
-        ),
+          })
+        }),
       } satisfies SourcesOutput
     },
   })

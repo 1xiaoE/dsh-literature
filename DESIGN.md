@@ -125,6 +125,13 @@ interface SourceAdapter {
 - **全文选择协议**：语义排序后按排名依次 `literature_pdf_preflight`（有界探测，不落盘）；取排名最高且 quality gates + fulltext 均达标的论文；选择轨迹落库 `selection_rank/selection_outcome/selection_rejection_reason`（如 rank1: FULLTEXT_UNAVAILABLE → rank2: SELECTED）。所有达标候选均无全文才 `fulltext_unavailable`。禁止"Top 1 无全文 → 整轮失败"，也禁止"PDF 可得就选低质量论文"。
 - **Landmark 增强**：`landmark_confidence`（seeds→1.0，否则 eligibility/impact/venue/hint 合成）+ `methodological_centrality`（agent 评分）；`StageDef.landmarkSeeds` 支持每阶段配置少量 curated seeds（接口就绪，暂不建大表）。
 
+## 3d. Selection 语义拆分、Knowledge-gap 引导、Curated Seeds（V0.3 收口）
+
+- **selection 语义拆分**（DB v5）：`agent_rank`（语义排名，final_score 序或 agent 显式指定）与 `preflight_attempt_order`（预检顺序，1-based 连续）分离；`selection_outcome` / `selection_rejection_reason` 独立记录。弃用混义的 `selection_rank`。
+- **不变式**（程序强制 + 测试）：attemptOrder 必须 1..n 连续；一旦 SELECTED 出现，之后不得再有更高 attemptOrder 条目；每 push 至多一个 SELECTED；picked 论文必须在其 selection 条目中为 SELECTED。`literature_pdf_preflight` / `literature_fetch_pdf` 携带 pushId 时在 SELECTED 后拒绝新的预检/下载。
+- **priority knowledge goal**：= 阶段 knowledgeGoals 顺序中第一个未覆盖 goal（Fundamentals 顺序：balance_stability → impedance_compliance → template_dynamics → contact_force → whole_body）。候选带 `priorityGoalMatch`，进入预排序权重 `priorityGoal`（0.1）；agent curriculum 排序同样对 priority goal 匹配显著加权——不绕过质量门。
+- **curated landmark seeds**（仅检索/课程锚点，不绕过任何门槛）：Fundamentals 配置 2 颗——VMC（Pratt 2001，goals: impedance_compliance + balance_stability）、Instantaneous Capture Input（Pratt 2006，goals: template_dynamics + balance_stability）。seeds 无条件进入 landmark 池（landmark_confidence=1，curriculum hint 下限 0.75），其标题作为 landmark 检索锚查询；无全文时不强制选择，可扩展相关候选。
+
 ## 4. 两阶段 Ranking（调整 3）与 Stage Relevance（约束）
 
 - 每个阶段带 `StageDef`：`label` / `scope` / `preferredKeywords` / `downweightKeywords` / `excludeKeywords`。

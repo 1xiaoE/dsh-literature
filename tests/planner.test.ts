@@ -13,7 +13,9 @@ import { describe, expect, it } from 'vitest'
 import { defaultConfig, type LiteratureConfig, type TopicDef } from '../src/config.js'
 import {
   applyNegativeFilter,
+  firstUncoveredGoal,
   landmarkEligibility,
+  matchSeed,
   planQueries,
   resolveTopic,
 } from '../src/lib/planner.js'
@@ -326,5 +328,48 @@ describe('curriculum / landmark / knowledge-gap (V0.3)', () => {
     expect(r.score).toBe(2)
     const r2 = knowledgeGapHint('Neural network policy for parkour', goals)
     expect(r2.matched).toEqual([])
+  })
+})
+
+describe('priority goal + curated seeds (V0.3)', () => {
+  it('priority goal is the first uncovered goal in stage order', () => {
+    const cfg = defaultConfig()
+    const stage = cfg.stageOrder[0]! // 基础控制
+    const covered = new Set(['whole_body', 'contact_force'])
+    const pg = firstUncoveredGoal(stage, covered)
+    expect(pg?.id).toBe('balance_stability')
+    // after covering balance_stability, the next priority is impedance_compliance
+    const pg2 = firstUncoveredGoal(stage, new Set([...covered, 'balance_stability']))
+    expect(pg2?.id).toBe('impedance_compliance')
+  })
+
+  it('landmark pool plans seed-title anchor queries', () => {
+    const cfg = defaultConfig()
+    const topic = cfg.topics[0]!
+    const stage = cfg.stageOrder[0]!
+    const landmark = planQueries(topic, stage, 'landmark')
+    for (const seed of stage.landmarkSeeds) {
+      expect(landmark.some((q) => q.text === seed.title.toLowerCase())).toBe(true)
+    }
+    // recent pool does NOT carry seed queries
+    const recent = planQueries(topic, stage, 'recent')
+    for (const seed of stage.landmarkSeeds) {
+      expect(recent.some((q) => q.text === seed.title.toLowerCase())).toBe(false)
+    }
+  })
+
+  it('matches seeds by DOI and title', () => {
+    const cfg = defaultConfig()
+    const stage = cfg.stageOrder[0]!
+    expect(
+      matchSeed({ doi: '10.1177/02783640122067309', title: 'Virtual Model Control: An Intuitive Approach for Bipedal Locomotion' }, stage.landmarkSeeds),
+    ).toBe(true)
+    expect(
+      matchSeed({ doi: '10.1177/02783640122067309' }, stage.landmarkSeeds),
+    ).toBe(true)
+    expect(
+      matchSeed({ title: 'Instantaneous Capture Input for Balancing the Variable Height Inverted Pendulum' }, stage.landmarkSeeds),
+    ).toBe(true)
+    expect(matchSeed({ title: 'Some unrelated paper' }, stage.landmarkSeeds)).toBe(false)
   })
 })

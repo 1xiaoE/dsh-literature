@@ -241,6 +241,9 @@ describe('stage relevance gate', () => {
       status: 'completed',
       paperId: 'arxiv:2401.001',
       reportPath: '/tmp/reports/x.md',
+      selection: [
+        { paperId: 'arxiv:2401.001', agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'arXiv OA' },
+      ],
       scores: [
         {
           paperId: 'arxiv:2401.001',
@@ -266,6 +269,105 @@ describe('stage relevance gate', () => {
     expect(cand.rationale).toContain('stage-matched')
     expect(cand.picked).toBe(1)
     expect(cand.final_score).toBeGreaterThan(0)
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('selection invariant (V0.3)', () => {
+  function setup() {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-sel-'))
+    const rt = createRuntime(normalizeConfig({ dataDir: dir }), {
+      fetchImpl: (async () => new Response('nope', { status: 403 })) as typeof fetch,
+    })
+    const paperId = seed(rt)
+    ensureStage(rt.db, 'legged_robot_control', 3)
+    const pushId = startPush(rt.db, 'legged_robot_control', 1).pushId
+    rt.db
+      .prepare('INSERT INTO candidates (push_id, paper_id, rank_hint, picked, is_seen) VALUES (?, ?, 1, 0, 0)')
+      .run(pushId, paperId)
+    const recordTool = defineLiteratureRecord(() => rt, () => null)
+    return { rt, dir, pushId, paperId, recordTool }
+  }
+  const okScores = (pid: string) => [
+    {
+      paperId: pid,
+      relevance: 0.8,
+      learningValue: 0.7,
+      representativeness: 0.7,
+      novelty: 0.4,
+      stageRelevance: 0.9,
+      curriculumValue: 0.85,
+      rationale: 'ok',
+    },
+  ]
+
+  it('rejects attempts after SELECTED (invariant)', async () => {
+    const { rt, dir, pushId, paperId, recordTool } = setup()
+    await expect(
+      run(recordTool, {
+        pushId,
+        status: 'completed',
+        paperId,
+        selection: [
+          { paperId, agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'OA' },
+          { paperId, agentRank: 2, attemptOrder: 2, outcome: 'FULLTEXT_UNAVAILABLE', reason: 'late' },
+        ],
+        scores: okScores(paperId),
+      }),
+    ).rejects.toThrow(/SELECTED 出现后/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('rejects a second SELECTED (selected_count == 1)', async () => {
+    const { rt, dir, pushId, paperId, recordTool } = setup()
+    await expect(
+      run(recordTool, {
+        pushId,
+        status: 'completed',
+        paperId,
+        selection: [
+          { paperId, agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'OA' },
+          { paperId, agentRank: 3, attemptOrder: 2, outcome: 'SELECTED', reason: 'again' },
+        ],
+        scores: okScores(paperId),
+      }),
+    ).rejects.toThrow(/至多一个 SELECTED/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('rejects attemptOrder not starting at 1 / non-contiguous', async () => {
+    const { rt, dir, pushId, paperId, recordTool } = setup()
+    await expect(
+      run(recordTool, {
+        pushId,
+        status: 'completed',
+        paperId,
+        selection: [
+          { paperId, agentRank: 1, attemptOrder: 2, outcome: 'SELECTED', reason: 'OA' },
+        ],
+        scores: okScores(paperId),
+      }),
+    ).rejects.toThrow(/attemptOrder/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('writes agent_rank and preflight_attempt_order separately', async () => {
+    const { rt, dir, pushId, paperId, recordTool } = setup()
+    await run(recordTool, {
+      pushId,
+      status: 'completed',
+      paperId,
+      selection: [
+        { paperId, agentRank: 3, attemptOrder: 1, outcome: 'SELECTED', reason: 'OA' },
+      ],
+      scores: okScores(paperId),
+    })
+    const row = rt.db
+      .prepare('SELECT agent_rank, preflight_attempt_order, selection_outcome FROM candidates WHERE push_id = ? AND paper_id = ?')
+      .get(pushId, paperId) as { agent_rank: number | null; preflight_attempt_order: number | null; selection_outcome: string }
+    expect(row.agent_rank).toBe(3) // agent semantic rank, independent of attempt order
+    expect(row.preflight_attempt_order).toBe(1)
+    expect(row.selection_outcome).toBe('SELECTED')
     rmSync(dir, { recursive: true, force: true })
   })
 })

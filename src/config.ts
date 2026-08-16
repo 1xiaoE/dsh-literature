@@ -18,6 +18,8 @@ export interface RankingWeights {
   stageRelevance: number
   /** weight of the uncovered-knowledge-goal hint */
   knowledgeGap: number
+  /** weight of the priority-goal match hint */
+  priorityGoal: number
 }
 
 export interface AgentRankingWeights {
@@ -54,8 +56,8 @@ export interface StageDef {
   searchQueries: string[]
   /** knowledge goals for stage progress (coverage-gated advancement) */
   knowledgeGoals: KnowledgeGoal[]
-  /** curated landmark seeds (DOI / arXiv id / title fragment); interface only for now */
-  landmarkSeeds: string[]
+  /** curated landmark seeds as retrieval/curriculum anchors (title/doi/arxiv + goals) */
+  landmarkSeeds: Array<{ doi?: string; arxivId?: string; title: string; goals: string[] }>
   /** optional per-stage override of the curriculum_value weight (Fundamentals boost) */
   curriculumWeight?: number
 }
@@ -147,8 +149,9 @@ export const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
   impact: 0.15,
   topicSimilarity: 0.15,
   fulltextAvailability: 0.15,
-  stageRelevance: 0.25,
-  knowledgeGap: 0.15,
+  stageRelevance: 0.2,
+  knowledgeGap: 0.1,
+  priorityGoal: 0.1,
 }
 
 export const DEFAULT_AGENT_RANKING_WEIGHTS: AgentRankingWeights = {
@@ -221,13 +224,24 @@ export const DEFAULT_STAGES: StageDef[] = [
       'virtual model control locomotion'
     ],
     knowledgeGoals: [
+      { id: 'balance_stability', label: 'balance and stability', keywords: ['balance', 'stability', 'push recovery', 'capture point', 'postural', 'equilibrium', 'capture input', 'ankle strategy'] },
+      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'compliance', 'stiffness', 'damping', 'virtual spring', 'compliant', 'virtual model'] },
       { id: 'template_dynamics', label: 'template / simplified dynamics', keywords: ['template model', 'inverted pendulum', 'lipm', 'slip', 'spring loaded', 'centroidal', 'zmp', 'simplified model'] },
-      { id: 'balance_stability', label: 'balance and stability', keywords: ['balance', 'stability', 'push recovery', 'capture point', 'postural', 'equilibrium'] },
       { id: 'contact_force', label: 'contact / force control', keywords: ['contact force', 'ground reaction', 'grf', 'force control', 'friction cone', 'wrench', 'reaction force'] },
-      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'compliance', 'stiffness', 'damping', 'virtual spring', 'compliant'] },
       { id: 'whole_body', label: 'whole-body locomotion control', keywords: ['whole-body control', 'whole body control', 'whole body dynamics', 'full body control', 'wbc'] },
     ],
-    landmarkSeeds: [],
+    landmarkSeeds: [
+      {
+        doi: '10.1177/02783640122067309',
+        title: 'Virtual Model Control: An Intuitive Approach for Bipedal Locomotion',
+        goals: ['impedance_compliance', 'balance_stability'],
+      },
+      {
+        doi: '10.1109/ROBOT.2006.1641685',
+        title: 'Instantaneous Capture Input for Balancing the Variable Height Inverted Pendulum',
+        goals: ['template_dynamics', 'balance_stability'],
+      },
+    ],
     curriculumWeight: 0.35,
   },
   {
@@ -558,6 +572,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
       ),
       stageRelevance: pickNumber(partial.ranking, 'stageRelevance', base.ranking.stageRelevance),
       knowledgeGap: pickNumber(partial.ranking, 'knowledgeGap', base.ranking.knowledgeGap),
+      priorityGoal: pickNumber(partial.ranking, 'priorityGoal', base.ranking.priorityGoal),
     }
   }
   if (isRecord(partial.agentRanking)) {

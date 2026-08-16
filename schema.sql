@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS candidates (
   stage_relevance_score REAL,                     -- agent-assigned (semantic ranking)
   curriculum_hint       REAL,                      -- deterministic hint (program)
   curriculum_value      REAL,                      -- agent-assigned
-  selection_rank        INTEGER,                   -- preflight attempt order
+  agent_rank            INTEGER,                   -- agent semantic ranking position (final_score order)
+  preflight_attempt_order INTEGER,                 -- order in which preflight was attempted
+  priority_goal_match   INTEGER NOT NULL DEFAULT 0,
   selection_outcome     TEXT,                      -- SELECTED | FULLTEXT_UNAVAILABLE | BELOW_QUALITY_GATE | PDF_FAILED
   selection_rejection_reason TEXT,
   landmark_confidence   REAL,
@@ -125,4 +127,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 4;
+PRAGMA user_version = 5;

@@ -17,7 +17,7 @@ import { ArxivAdapter } from './arxiv.js'
 import { OpenAlexAdapter } from './openalex.js'
 import { CrossrefAdapter } from './crossref.js'
 import { UnpaywallAdapter } from './unpaywall.js'
-import { landmarkEligibility } from '../lib/planner.js'
+import { landmarkEligibility, matchSeed } from '../lib/planner.js'
 import { stageRelevanceHint } from '../lib/ranking.js'
 import type { LiteratureConfig, StageDef } from '../config.js'
 
@@ -206,8 +206,15 @@ export class SourceRegistry {
 
     let result = papers
     if (pool === 'landmark' && stage) {
-      // landmark eligibility: stage relevance + impact + venue, capped
-      result = papers
+      // curated seeds are admitted unconditionally as anchors; others must
+      // pass landmark eligibility; the pool stays capped
+      const seeds: PaperRef[] = []
+      const candidates: PaperRef[] = []
+      for (const p of papers) {
+        if (matchSeed(p, stage.landmarkSeeds)) seeds.push(p)
+        else candidates.push(p)
+      }
+      const eligible = candidates
         .map((p) => {
           const sr = stageRelevanceHint(`${p.title} ${p.abstract ?? ''}`, stage)
           return {
@@ -226,8 +233,8 @@ export class SourceRegistry {
         })
         .filter((x) => x.el.eligible)
         .sort((a, b) => b.el.score - a.el.score)
-        .slice(0, cfg.retrieval.landmarkMaxCandidates)
         .map((x) => x.p)
+      result = [...seeds, ...eligible].slice(0, cfg.retrieval.landmarkMaxCandidates)
       const allowed = new Set(result.map((p) => canonicalId(p)))
       // keep provenance only for admitted landmark papers
       for (let i = provenance.length - 1; i >= 0; i -= 1) {
