@@ -6,6 +6,7 @@ import { defaultConfig, currentYear } from '../src/config.js'
 import { agentFinalScore, impactScore, preRank, recencyScore, topicSimilarity } from '../src/lib/ranking.js'
 import { recordPaperInStage, ensureStage, getStage } from '../src/lib/stages.js'
 import { openDb, type Db } from '../src/db.js'
+import { startPush, getPush } from '../src/lib/history.js'
 
 describe('ranking', () => {
   it('recency decays with age', () => {
@@ -101,6 +102,21 @@ describe('stages', () => {
     const r = recordPaperInStage(db, 't', { targetPapers: 2, duplicate: true })
     expect(r.advanced).toBe(false)
     expect(getStage(db, 't').papersInStage).toBe(0)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('history.startPush supersede', () => {
+  it('supersedes stale running pushes of the same topic', () => {
+    const { db, dir } = (() => {
+      const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-push-'))
+      return { db: openDb(dir), dir }
+    })()
+    const p1 = startPush(db, 't', 1)
+    const p2 = startPush(db, 't', 1)
+    expect(getPush(db, p1.pushId)?.status).toBe('failed')
+    expect(getPush(db, p2.pushId)?.status).toBe('running')
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })
