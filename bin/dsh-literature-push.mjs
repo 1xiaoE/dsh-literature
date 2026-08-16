@@ -100,7 +100,7 @@ function main() {
   console.error(`[dsh-literature] running headless push for topic: ${topic}`)
   const res = spawnSync(
     process.execPath,
-    ['--import', 'tsx/esm', dshBin(args.harness), 'headless', prompt],
+    ['--import', 'tsx/esm', dshBin(args.harness), '--profile', 'headless', prompt],
     { cwd: args.harness, stdio: 'inherit', env: process.env, timeout: 30 * 60 * 1000 },
   )
   process.exit(res.status ?? 1)

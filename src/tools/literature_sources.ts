@@ -71,6 +71,15 @@ function quickPdfAvailability(paper: PaperRef): boolean {
   return Boolean(paper.arxivId || paper.url)
 }
 
+/** Omit keys whose value is undefined — tool output must be lossless JSON. */
+function clean<T extends Record<string, unknown>>(obj: T): T {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) out[k] = v
+  }
+  return out as T
+}
+
 /** Convert a stored row back to the PaperRef shape the adapters understand. */
 export function rowToRef(row: PaperRow): PaperRef {
   return {
@@ -232,25 +241,27 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         stage: stage.current,
         stageLabel: stageLabel(cfg.stageOrder, stage.current),
         total: rows.length,
-        candidates: topN.map(({ paper, pre, isSeen }, i) => ({
-          paperId: canonicalId(paper),
-          title: paper.title,
-          year: paper.year,
-          venue: paper.venue,
-          authors: paper.authors,
-          doi: paper.doi,
-          arxivId: paper.arxivId,
-          url: paper.url,
-          citations: paper.citations,
-          abstract: paper.abstract,
-          isSeen,
-          fulltextAvailable: pre.fulltextAvailable,
-          recencyScore: pre.recencyScore,
-          impactScore: pre.impactScore,
-          topicSimilarity: pre.topicSimilarity,
-          preRankScore: pre.score,
-          rankHint: i + 1,
-        })),
+        candidates: topN.map(({ paper, pre, isSeen }, i) =>
+          clean({
+            paperId: canonicalId(paper),
+            title: paper.title,
+            year: paper.year,
+            venue: paper.venue,
+            authors: paper.authors,
+            doi: paper.doi,
+            arxivId: paper.arxivId,
+            url: paper.url,
+            citations: paper.citations,
+            abstract: paper.abstract,
+            isSeen,
+            fulltextAvailable: pre.fulltextAvailable,
+            recencyScore: pre.recencyScore,
+            impactScore: pre.impactScore,
+            topicSimilarity: pre.topicSimilarity,
+            preRankScore: pre.score,
+            rankHint: i + 1,
+          }),
+        ),
       } satisfies SourcesOutput
     },
   })

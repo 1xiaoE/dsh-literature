@@ -42,8 +42,10 @@ export class CrossrefAdapter implements SourceAdapter {
   }
 
   async search(params: SearchParams): Promise<PaperRef[]> {
-    const years = `${Math.min(...params.years)}-01-01,${Math.max(...params.years)}-12-31`
-    const url = `${API}?query.bibliographic=${encodeURIComponent(params.topic)}&filter=from-pub-date:${years}&rows=${params.limit}&select=DOI,title,author,container-title,issued,is-referenced-by-count,abstract,URL,link`
+    const minYear = Math.min(...params.years)
+    const maxYear = Math.max(...params.years)
+    const filter = `from-pub-date:${minYear}-01-01,until-pub-date:${maxYear}-12-31`
+    const url = `${API}?query.bibliographic=${encodeURIComponent(params.topic)}&filter=${filter}&rows=${params.limit}&select=DOI,title,author,container-title,issued,is-referenced-by-count,abstract,URL,link`
     const data = (await this.getJson(url)) as { message?: { items?: CrossrefWork[] } }
     return (data.message?.items ?? []).map((w) => this.toRef(w)).filter((p): p is PaperRef => p !== null)
   }
