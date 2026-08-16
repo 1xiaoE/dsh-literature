@@ -155,6 +155,9 @@ describe('FULLTEXT_UNAVAILABLE_TERMINAL', () => {
       status: 'fulltext_unavailable',
       errorCode: 'NO_LEGAL_FULLTEXT',
       errorDetail: 'all sources failed: 403',
+      selection: [
+        { paperId: 'arxiv:2401.001', agentRank: 1, attemptOrder: 1, outcome: 'FULLTEXT_UNAVAILABLE', reason: 'all sources 403' },
+      ],
     })
     expect(rec.status).toBe('fulltext_unavailable')
     expect(rec.stageAdvanced).toBe(false)
@@ -368,6 +371,41 @@ describe('selection invariant (V0.3)', () => {
     expect(row.agent_rank).toBe(3) // agent semantic rank, independent of attempt order
     expect(row.preflight_attempt_order).toBe(1)
     expect(row.selection_outcome).toBe('SELECTED')
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('fulltext_unavailable trail enforcement (V0.3)', () => {
+  it('requires a selection trail for fulltext_unavailable status', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-ftu-'))
+    const rt = createRuntime(normalizeConfig({ dataDir: dir }), {
+      fetchImpl: (async () => new Response('nope', { status: 403 })) as typeof fetch,
+    })
+    const paperId = seed(rt)
+    ensureStage(rt.db, 'legged_robot_control', 3)
+    const pushId = startPush(rt.db, 'legged_robot_control', 1).pushId
+    rt.db
+      .prepare('INSERT INTO candidates (push_id, paper_id, rank_hint, picked, is_seen) VALUES (?, ?, 1, 0, 0)')
+      .run(pushId, paperId)
+    const recordTool = defineLiteratureRecord(() => rt, () => null)
+    await expect(
+      run(recordTool, { pushId, status: 'fulltext_unavailable' }),
+    ).rejects.toThrow(/selection 轨迹/)
+    // with the trail, it succeeds and persists attempt order
+    const rec = await run(recordTool, {
+      pushId,
+      status: 'fulltext_unavailable',
+      selection: [
+        { paperId, agentRank: 2, attemptOrder: 1, outcome: 'FULLTEXT_UNAVAILABLE', reason: 'all sources 403' },
+      ],
+    })
+    expect(rec.status).toBe('fulltext_unavailable')
+    const row = rt.db
+      .prepare('SELECT agent_rank, preflight_attempt_order, selection_outcome FROM candidates WHERE push_id = ? AND paper_id = ?')
+      .get(pushId, paperId) as { agent_rank: number | null; preflight_attempt_order: number | null; selection_outcome: string }
+    expect(row.agent_rank).toBe(2)
+    expect(row.preflight_attempt_order).toBe(1)
+    expect(row.selection_outcome).toBe('FULLTEXT_UNAVAILABLE')
     rmSync(dir, { recursive: true, force: true })
   })
 })

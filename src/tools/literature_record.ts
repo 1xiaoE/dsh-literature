@@ -206,6 +206,11 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       }
 
       // --- selection trail (invariant-enforced) ---
+      if (args.status === 'fulltext_unavailable' && (!args.selection || args.selection.length === 0)) {
+        throw new Error(
+          'fulltext_unavailable 必须提交 selection 轨迹（全部尝试的候选、agentRank、attemptOrder、outcome 与原因）',
+        )
+      }
       if (args.selection && args.selection.length > 0) {
         const sorted = [...args.selection].sort((a, b) => a.attemptOrder - b.attemptOrder)
         const orders = sorted.map((s) => s.attemptOrder)

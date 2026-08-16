@@ -47,18 +47,30 @@ export class OpenAlexAdapter implements SourceAdapter {
     private readonly mailto?: string,
   ) {}
 
-  private async getJson(url: string): Promise<unknown> {
-    const ctrl = new AbortController()
-    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
-    try {
-      const headers: Record<string, string> = { accept: 'application/json' }
-      if (this.mailto) headers['User-Agent'] = this.mailto
-      const res = await this.fetchImpl(url, { signal: ctrl.signal, headers })
-      if (!res.ok) throw new Error(`OpenAlex API HTTP ${res.status}`)
-      return await res.json()
-    } finally {
-      clearTimeout(timer)
+  private async getJson(url: string, retries = 2): Promise<unknown> {
+    let lastErr: unknown = null
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      const ctrl = new AbortController()
+      const timer = setTimeout(() => ctrl.abort(), this.timeoutMs)
+      try {
+        const headers: Record<string, string> = { accept: 'application/json' }
+        if (this.mailto) headers['User-Agent'] = this.mailto
+        const res = await this.fetchImpl(url, { signal: ctrl.signal, headers })
+        if (res.status === 429 || res.status >= 500) {
+          lastErr = new Error(`OpenAlex API HTTP ${res.status}`)
+          await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)))
+          continue
+        }
+        if (!res.ok) throw new Error(`OpenAlex API HTTP ${res.status}`)
+        return await res.json()
+      } catch (err) {
+        lastErr = err
+        if (attempt < retries) await new Promise((r) => setTimeout(r, 800 * (attempt + 1)))
+      } finally {
+        clearTimeout(timer)
+      }
     }
+    throw lastErr ?? new Error('OpenAlex API failed')
   }
 
   private toRef(w: OpenAlexWork): PaperRef | null {
@@ -106,6 +118,9 @@ export class OpenAlexAdapter implements SourceAdapter {
       } catch (err) {
         console.warn(`[dsh-literature] openalex query "${q.text}" failed: ${String(err)}`)
         continue
+      } finally {
+        // polite pool: small gap between queries
+        await new Promise((r) => setTimeout(r, 120))
       }
       for (const w of data?.results ?? []) {
         const paper = this.toRef(w)
