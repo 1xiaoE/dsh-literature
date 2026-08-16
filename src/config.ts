@@ -137,6 +137,8 @@ export interface LiteratureConfig {
     timeoutMs: number
     /** minimum bytes for a plausible PDF */
     minPdfBytes: number
+    /** email required by the Unpaywall legal-OA locator */
+    unpaywallEmail: string
   }
 }
 
@@ -436,13 +438,13 @@ export function defaultConfig(): LiteratureConfig {
     stageRelevanceThreshold: 0.6,
     curriculumValueThreshold: 0.5,
     preRankTopN: 15,
-    maxSelectionAttempts: 6,
+    maxSelectionAttempts: 8,
     minKnowledgeCoverage: 3,
     retrieval: { ...DEFAULT_RETRIEVAL },
     ranking: { ...DEFAULT_RANKING_WEIGHTS },
     agentRanking: { ...DEFAULT_AGENT_RANKING_WEIGHTS },
     fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext' },
-    http: { timeoutMs: 30000, minPdfBytes: 10240 },
+    http: { timeoutMs: 30000, minPdfBytes: 10240, unpaywallEmail: 'dsh-literature@example.org' },
   }
 }
 
@@ -595,6 +597,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
     out.http = {
       timeoutMs: pickNumber(partial.http, 'timeoutMs', base.http.timeoutMs),
       minPdfBytes: pickNumber(partial.http, 'minPdfBytes', base.http.minPdfBytes),
+      unpaywallEmail: pickString(partial.http, 'unpaywallEmail', base.http.unpaywallEmail),
     }
   }
   return out

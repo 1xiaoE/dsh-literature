@@ -16,6 +16,7 @@ import { canonicalId, normalizeTitle } from './types.js'
 import { ArxivAdapter } from './arxiv.js'
 import { OpenAlexAdapter } from './openalex.js'
 import { CrossrefAdapter } from './crossref.js'
+import { UnpaywallAdapter } from './unpaywall.js'
 import { landmarkEligibility } from '../lib/planner.js'
 import { stageRelevanceHint } from '../lib/ranking.js'
 import type { LiteratureConfig, StageDef } from '../config.js'
@@ -24,6 +25,8 @@ export interface RegistryOptions {
   fetchImpl?: typeof fetch
   timeoutMs?: number
   mailto?: string
+  /** email required by the Unpaywall API (legal-OA locator) */
+  unpaywallEmail?: string
 }
 
 export interface RetrievalProvenance {
@@ -270,5 +273,8 @@ export function createRegistry(opts: RegistryOptions = {}): SourceRegistry {
   registry.register(new ArxivAdapter(opts.fetchImpl, opts.timeoutMs))
   registry.register(new OpenAlexAdapter(opts.fetchImpl, opts.timeoutMs, opts.mailto))
   registry.register(new CrossrefAdapter(opts.fetchImpl, opts.timeoutMs))
+  registry.register(
+    new UnpaywallAdapter(opts.unpaywallEmail ?? 'dsh-literature@example.org', opts.fetchImpl, opts.timeoutMs),
+  )
   return registry
 }
