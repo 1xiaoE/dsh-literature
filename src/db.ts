@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export type Db = DatabaseSync
 
@@ -162,6 +162,27 @@ CREATE TABLE IF NOT EXISTS stages (
         retrieval_score REAL,
         candidate_pool  TEXT NOT NULL CHECK (candidate_pool IN ('recent','landmark')),
         retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
+      );`,
+    )
+  }
+  if (version < 4) {
+    db.exec('ALTER TABLE candidates ADD COLUMN curriculum_hint REAL;')
+    db.exec('ALTER TABLE candidates ADD COLUMN curriculum_value REAL;')
+    db.exec('ALTER TABLE candidates ADD COLUMN selection_rank INTEGER;')
+    db.exec(
+      "ALTER TABLE candidates ADD COLUMN selection_outcome TEXT "
+      + "CHECK (selection_outcome IS NULL OR selection_outcome IN ('SELECTED','FULLTEXT_UNAVAILABLE','BELOW_QUALITY_GATE','PDF_FAILED'));",
+    )
+    db.exec('ALTER TABLE candidates ADD COLUMN selection_rejection_reason TEXT;')
+    db.exec('ALTER TABLE candidates ADD COLUMN landmark_confidence REAL;')
+    db.exec('ALTER TABLE candidates ADD COLUMN methodological_centrality REAL;')
+    db.exec("ALTER TABLE stages ADD COLUMN covered_goals TEXT NOT NULL DEFAULT '[]';")
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS knowledge_coverage (
+        push_id  INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+        paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+        goal     TEXT NOT NULL,
+        PRIMARY KEY (push_id, paper_id, goal)
       );`,
     )
   }

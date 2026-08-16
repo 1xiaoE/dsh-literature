@@ -185,7 +185,7 @@ describe('stage relevance gate', () => {
     const recordTool = defineLiteratureRecord(() => rt, () => null)
     await expect(
       run(recordTool, { pushId, status: 'completed', paperId: 'arxiv:2401.001', scores: [] }),
-    ).rejects.toThrow(/stage_relevance_score 缺失/)
+    ).rejects.toThrow(/评分缺失/)
     rmSync(dir, { recursive: true, force: true })
   })
 
@@ -213,6 +213,7 @@ describe('stage relevance gate', () => {
             representativeness: 0.9,
             novelty: 0.5,
             stageRelevance: 0.4, // below default threshold 0.6
+            curriculumValue: 0.9,
             rationale: 'high impact but not stage-matched',
           },
         ],
@@ -248,9 +249,11 @@ describe('stage relevance gate', () => {
           representativeness: 0.7,
           novelty: 0.4,
           stageRelevance: 0.9,
+          curriculumValue: 0.85,
           rationale: 'stage-matched fundamentals paper',
         },
       ],
+      knowledgeGoals: ['template_dynamics'],
     })
     expect(rec.stageMatched).toBe(true)
     expect(rec.papersInStage).toBe(1)

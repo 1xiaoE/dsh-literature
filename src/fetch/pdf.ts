@@ -116,3 +116,74 @@ export async function fetchPdf(
   )
   return result
 }
+
+export interface PreflightProbe {
+  source: string
+  url: string
+  status: 'ok' | 'http_error' | 'not_pdf' | 'network_error'
+  http?: number
+}
+
+export interface PreflightResult {
+  available: boolean
+  probes: PreflightProbe[]
+}
+
+/**
+ * Cheap full-text availability preflight: probes each candidate with a
+ * bounded fetch (up to probeBytes, then abort) and checks the PDF magic.
+ * No file is written — the real download happens only for the selected paper.
+ */
+export async function preflightPdf(
+  candidates: PdfCandidate[],
+  opts: { timeoutMs?: number; probeBytes?: number; fetchImpl?: typeof fetch } = {},
+): Promise<PreflightResult> {
+  const timeoutMs = opts.timeoutMs ?? 15000
+  const probeBytes = opts.probeBytes ?? 16384
+  const fetchImpl = opts.fetchImpl ?? fetch
+  const probes: PreflightProbe[] = []
+
+  for (const c of candidates) {
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+    try {
+      const res = await fetchImpl(c.url, { signal: ctrl.signal, redirect: 'follow' })
+      if (!res.ok) {
+        probes.push({ source: c.source, url: c.url, status: 'http_error', http: res.status })
+        continue
+      }
+      const reader = res.body?.getReader()
+      let head = Buffer.alloc(0)
+      if (reader) {
+        let got = 0
+        while (got < probeBytes) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) {
+            head = Buffer.concat([head, Buffer.from(value)])
+            got += value.byteLength
+          }
+        }
+        await reader.cancel().catch(() => undefined)
+      } else {
+        head = Buffer.from(await res.arrayBuffer())
+      }
+      if (!looksLikePdf(head)) {
+        probes.push({ source: c.source, url: c.url, status: 'not_pdf' })
+        continue
+      }
+      probes.push({ source: c.source, url: c.url, status: 'ok' })
+      return { available: true, probes }
+    } catch (err) {
+      const e = err as { name?: string }
+      probes.push({
+        source: c.source,
+        url: c.url,
+        status: e?.name === 'AbortError' ? 'network_error' : 'http_error',
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  return { available: false, probes }
+}

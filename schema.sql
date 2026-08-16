@@ -48,6 +48,13 @@ CREATE TABLE IF NOT EXISTS candidates (
   fulltext_available   INTEGER NOT NULL DEFAULT 0,
   stage_relevance_hint REAL,                      -- deterministic hint (program)
   stage_relevance_score REAL,                     -- agent-assigned (semantic ranking)
+  curriculum_hint       REAL,                      -- deterministic hint (program)
+  curriculum_value      REAL,                      -- agent-assigned
+  selection_rank        INTEGER,                   -- preflight attempt order
+  selection_outcome     TEXT,                      -- SELECTED | FULLTEXT_UNAVAILABLE | BELOW_QUALITY_GATE | PDF_FAILED
+  selection_rejection_reason TEXT,
+  landmark_confidence   REAL,
+  methodological_centrality REAL,
   candidate_pool       TEXT NOT NULL DEFAULT 'recent'
                        CHECK (candidate_pool IN ('recent','landmark')),
   relevance_score      REAL,                      -- agent semantic ranking trace
@@ -102,12 +109,20 @@ CREATE TABLE IF NOT EXISTS retrievals (
   retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS knowledge_coverage (
+  push_id  INTEGER NOT NULL REFERENCES pushes(id) ON DELETE CASCADE,
+  paper_id TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  goal     TEXT NOT NULL,
+  PRIMARY KEY (push_id, paper_id, goal)
+);
+
 CREATE TABLE IF NOT EXISTS stages (
   topic           TEXT PRIMARY KEY,
   current         INTEGER NOT NULL DEFAULT 1,
   papers_in_stage INTEGER NOT NULL DEFAULT 0,     -- stage-matched completed picks in the current stage
   target_papers   INTEGER NOT NULL DEFAULT 3,     -- advance gate (config override)
+  covered_goals   TEXT NOT NULL DEFAULT '[]',     -- JSON array of goal ids covered in this stage
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;

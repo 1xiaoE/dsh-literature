@@ -1,14 +1,17 @@
 /**
  * Tool: literature_record — finalize a push: status transition, semantic
- * ranking trace (Stage B scores recorded by the agent, including
- * stage_relevance_score), picked paper, provenance (report path / model
- * route), and stage progression.
+ * ranking trace (Stage B scores incl. stage_relevance + curriculum_value +
+ * methodological_centrality), selection attempt trail, knowledge-goal
+ * coverage, provenance, and stage progression.
  *
- * Stage gates (per design):
- * - A paper below stageRelevanceThreshold (or missing its score) is NOT
- *   pickable as Top 1 — literature_record rejects it so the agent must
- *   choose a stage-matched paper or report no_candidate.
- * - Stage progression counts ONLY stage-matched completed picks.
+ * Gates:
+ * - picked paper must pass BOTH stage_relevance >= threshold AND
+ *   curriculum_value >= threshold (below either → reject, even with high
+ *   overall impact or easy fulltext).
+ * - selection trail (selection_rank / selection_outcome /
+ *   selection_rejection_reason) is recorded per tried candidate.
+ * - stage advancement requires target paper count AND minimum knowledge
+ *   coverage (union of goals covered by stage-matched picks).
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
@@ -17,6 +20,7 @@ import { agentFinalScore } from '../lib/ranking.js'
 import { recordPaperInStage, getStage, stageLabel } from '../lib/stages.js'
 
 export type PushStatus = 'completed' | 'failed' | 'no_candidate' | 'fulltext_unavailable'
+export type SelectionOutcome = 'SELECTED' | 'FULLTEXT_UNAVAILABLE' | 'BELOW_QUALITY_GATE' | 'PDF_FAILED'
 
 export interface RecordScoreEntry {
   paperId: string
@@ -25,7 +29,16 @@ export interface RecordScoreEntry {
   representativeness: number
   novelty: number
   stageRelevance: number
+  curriculumValue: number
+  methodologicalCentrality?: number
   rationale: string
+}
+
+export interface SelectionEntry {
+  paperId: string
+  rank: number
+  outcome: SelectionOutcome
+  reason?: string
 }
 
 export interface RecordInput {
@@ -36,6 +49,8 @@ export interface RecordInput {
   errorCode?: string
   errorDetail?: string
   scores?: RecordScoreEntry[]
+  selection?: SelectionEntry[]
+  knowledgeGoals?: string[]
   advanceStage?: boolean
   notes?: string
 }
@@ -47,6 +62,7 @@ export interface RecordOutput {
   stageLabel: string
   papersInStage: number
   targetPapers: number
+  coveredGoals: string[]
   stageAdvanced: boolean
   duplicate: boolean
   stageMatched: boolean
@@ -56,9 +72,9 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
   return defineTool({
     name: 'literature_record',
     description:
-      '结束一次推送：写入状态（completed/failed/no_candidate/fulltext_unavailable）、语义排序评分追溯（relevance/learning_value/representativeness/novelty/stage_relevance + rationale）、选中论文与溯源。阶段门控：stage_relevance 低于阈值的论文不可选为 Top 1；阶段推进只统计符合当前阶段的成功论文（advanceStage=true 强制推进）。',
+      '结束一次推送：写入状态、语义排序评分追溯（relevance/learning_value/representativeness/novelty/stage_relevance/curriculum_value/methodological_centrality + rationale）、selection 尝试轨迹（rank/outcome/reason）、知识目标覆盖（knowledgeGoals）与溯源。门控：picked 论文须 stage_relevance ≥ 阈值 且 curriculum_value ≥ 阈值；阶段推进须同时满足目标篇数与最小知识覆盖（advanceStage=true 强制推进）。',
     parameters: {
-      pushId: { type: 'integer', required: true, description: '推送号（literature_push_now / literature_sources 返回）' },
+      pushId: { type: 'integer', required: true, description: '推送号' },
       status: {
         type: 'string',
         required: true,
@@ -71,9 +87,14 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       errorDetail: { type: 'string', description: '失败详情' },
       advanceStage: { type: 'boolean', description: '强制推进到下一阶段（人工切换）' },
       notes: { type: 'string', description: '备注' },
+      knowledgeGoals: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '本论文覆盖的知识目标 id（completed 时必填）',
+      },
       scores: {
         type: 'array',
-        description: '语义排序评分追溯（0~1，含 stage_relevance；picked 论文必须 ≥ 阈值）',
+        description: '语义排序评分追溯（0~1；picked 论文须 stageRelevance 与 curriculumValue 均 ≥ 阈值）',
         items: {
           type: 'object',
           additionalProperties: false,
@@ -84,7 +105,27 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
             representativeness: { type: 'number', required: true },
             novelty: { type: 'number', required: true },
             stageRelevance: { type: 'number', required: true },
+            curriculumValue: { type: 'number', required: true },
+            methodologicalCentrality: { type: 'number' },
             rationale: { type: 'string', required: true },
+          },
+        },
+      },
+      selection: {
+        type: 'array',
+        description: '全文预检选择轨迹：按语义排名依次尝试的每篇论文的结果',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            paperId: { type: 'string', required: true },
+            rank: { type: 'integer', required: true },
+            outcome: {
+              type: 'string',
+              required: true,
+              enum: ['SELECTED', 'FULLTEXT_UNAVAILABLE', 'BELOW_QUALITY_GATE', 'PDF_FAILED'],
+            },
+            reason: { type: 'string' },
           },
         },
       },
@@ -100,6 +141,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
           stageLabel: { type: 'string', required: true },
           papersInStage: { type: 'integer', required: true },
           targetPapers: { type: 'integer', required: true },
+          coveredGoals: { type: 'array', items: { type: 'string' }, required: true },
           stageAdvanced: { type: 'boolean', required: true },
           duplicate: { type: 'boolean', required: true },
           stageMatched: { type: 'boolean', required: true },
@@ -108,7 +150,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       render: (_args, value: RecordOutput) => [
         {
           type: 'text',
-          text: `push #${value.pushId} → ${value.status}；阶段「${value.stageLabel}」进度 ${value.papersInStage}/${value.targetPapers}${value.stageAdvanced ? '（已推进到下一阶段）' : ''}${value.duplicate ? '（重复推荐，不计阶段进度）' : ''}${value.stageMatched ? '' : '（与当前阶段不匹配，不计阶段进度）'}`,
+          text: `push #${value.pushId} → ${value.status}；阶段「${value.stageLabel}」进度 ${value.papersInStage}/${value.targetPapers}（覆盖 ${value.coveredGoals.join(',') || '无'}）${value.stageAdvanced ? '（已推进到下一阶段）' : ''}${value.duplicate ? '（重复推荐，不计进度）' : ''}${value.stageMatched ? '' : '（与当前阶段不匹配，不计进度）'}`,
         },
       ],
     },
@@ -126,7 +168,8 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         const update = db.prepare(
           `UPDATE candidates SET
              relevance_score = ?, learning_value_score = ?, representative_score = ?,
-             novelty_score = ?, stage_relevance_score = ?, final_score = ?, rationale = ?
+             novelty_score = ?, stage_relevance_score = ?, curriculum_value = ?,
+             methodological_centrality = ?, final_score = ?, rationale = ?
            WHERE push_id = ? AND paper_id = ?`,
         )
         for (const s of args.scores) {
@@ -137,6 +180,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
               representativeness: s.representativeness,
               novelty: s.novelty,
               stageRelevance: s.stageRelevance,
+              curriculumValue: s.curriculumValue,
             },
             cfg,
           )
@@ -146,6 +190,8 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
             s.representativeness,
             s.novelty,
             s.stageRelevance,
+            s.curriculumValue,
+            s.methodologicalCentrality ?? null,
             final,
             s.rationale,
             args.pushId,
@@ -154,21 +200,40 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         }
       }
 
-      // --- stage relevance gate: below-threshold papers are not pickable ---
+      // --- selection trail ---
+      if (args.selection && args.selection.length > 0) {
+        const updateSel = db.prepare(
+          `UPDATE candidates SET selection_rank = ?, selection_outcome = ?, selection_rejection_reason = ?
+           WHERE push_id = ? AND paper_id = ?`,
+        )
+        for (const s of args.selection) {
+          updateSel.run(s.rank, s.outcome, s.reason ?? null, args.pushId, s.paperId)
+        }
+      }
+
+      // --- quality gates: picked paper must pass stage AND curriculum ---
       let stageMatched = false
       if (args.status === 'completed' && args.paperId) {
         const row = db
-          .prepare('SELECT stage_relevance_score FROM candidates WHERE push_id = ? AND paper_id = ?')
-          .get(args.pushId, args.paperId) as { stage_relevance_score: number | null } | undefined
-        const score = row?.stage_relevance_score ?? null
-        if (score === null) {
+          .prepare(
+            'SELECT stage_relevance_score, curriculum_value FROM candidates WHERE push_id = ? AND paper_id = ?',
+          )
+          .get(args.pushId, args.paperId) as
+          | { stage_relevance_score: number | null; curriculum_value: number | null }
+          | undefined
+        if (!row || row.stage_relevance_score === null || row.curriculum_value === null) {
           throw new Error(
-            `stage_relevance_score 缺失：论文 ${args.paperId} 未在 scores 中提供 stage_relevance。请为 picked 论文记录 stageRelevance 评分后再提交。`,
+            `评分缺失：论文 ${args.paperId} 必须同时提供 stageRelevance 与 curriculumValue 评分。`,
           )
         }
-        if (score < cfg.stageRelevanceThreshold) {
+        if (row.stage_relevance_score < cfg.stageRelevanceThreshold) {
           throw new Error(
-            `stage_relevance_score=${score} 低于阈值 ${cfg.stageRelevanceThreshold}：该论文不得选为 Top 1（即使 overall impact 很高）。请改选符合当前阶段的论文，或以 no_candidate 结束。`,
+            `stage_relevance_score=${row.stage_relevance_score} 低于阈值 ${cfg.stageRelevanceThreshold}：该论文不得选为 Top 1。`,
+          )
+        }
+        if (row.curriculum_value < cfg.curriculumValueThreshold) {
+          throw new Error(
+            `curriculum_value=${row.curriculum_value} 低于阈值 ${cfg.curriculumValueThreshold}：该论文对当前阶段的课程价值不足，不得选为 Top 1（不得因 PDF 可获取而选择低课程价值论文）。`,
           )
         }
         stageMatched = true
@@ -190,7 +255,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         args.pushId,
       )
 
-      // --- stage progression: only stage-matched completed picks count ---
+      // --- knowledge coverage + stage progression ---
       let advanced = false
       let duplicate = false
       if (args.status === 'completed' && args.paperId) {
@@ -205,16 +270,27 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
           args.pushId,
           args.paperId,
         )
-        if (!duplicate && stageMatched) {
+
+        const goals = args.knowledgeGoals ?? []
+        if (goals.length > 0 && !duplicate) {
+          const ins = db.prepare(
+            'INSERT OR IGNORE INTO knowledge_coverage (push_id, paper_id, goal) VALUES (?, ?, ?)',
+          )
+          for (const g of goals) ins.run(args.pushId, args.paperId, g)
+        }
+
+        if (!duplicate) {
           const res = recordPaperInStage(db, topic, {
             targetPapers: cfg.targetPapersPerStage,
+            minCoverage: cfg.minKnowledgeCoverage,
+            coveredGoals: goals,
             forceAdvance: args.advanceStage ?? false,
           })
           advanced = res.advanced
         } else if (args.advanceStage) {
-          // manual switch is allowed regardless of match
           const res = recordPaperInStage(db, topic, {
             targetPapers: cfg.targetPapersPerStage,
+            minCoverage: cfg.minKnowledgeCoverage,
             forceAdvance: true,
           })
           advanced = res.advanced
@@ -229,6 +305,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         stageLabel: stageLabel(cfg.stageOrder, stage.current),
         papersInStage: stage.papersInStage,
         targetPapers: stage.targetPapers,
+        coveredGoals: stage.coveredGoals,
         stageAdvanced: advanced,
         duplicate,
         stageMatched,

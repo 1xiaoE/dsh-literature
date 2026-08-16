@@ -16,6 +16,8 @@ export interface RankingWeights {
   fulltextAvailability: number
   /** weight of the deterministic stage relevance hint */
   stageRelevance: number
+  /** weight of the uncovered-knowledge-goal hint */
+  knowledgeGap: number
 }
 
 export interface AgentRankingWeights {
@@ -25,6 +27,16 @@ export interface AgentRankingWeights {
   novelty: number
   /** weight of the agent-assigned stage_relevance_score */
   stageRelevance: number
+  /** weight of the agent-assigned curriculum_value_score */
+  curriculumValue: number
+}
+
+/** One knowledge goal of a stage; papers are tagged with covered goals. */
+export interface KnowledgeGoal {
+  id: string
+  label: string
+  /** keywords used for the deterministic gap hint */
+  keywords: string[]
 }
 
 /** One reading stage: scope + keyword guidance for stage relevance. */
@@ -40,6 +52,12 @@ export interface StageDef {
   excludeKeywords: string[]
   /** stage-specific retrieval queries (English, combined with topic queries) */
   searchQueries: string[]
+  /** knowledge goals for stage progress (coverage-gated advancement) */
+  knowledgeGoals: KnowledgeGoal[]
+  /** curated landmark seeds (DOI / arXiv id / title fragment); interface only for now */
+  landmarkSeeds: string[]
+  /** optional per-stage override of the curriculum_value weight (Fundamentals boost) */
+  curriculumWeight?: number
 }
 
 /**
@@ -94,8 +112,14 @@ export interface LiteratureConfig {
   targetPapersPerStage: number
   /** minimum agent stage_relevance_score for a paper to be pickable as Top 1 */
   stageRelevanceThreshold: number
+  /** minimum agent curriculum_value_score for a paper to be pickable as Top 1 */
+  curriculumValueThreshold: number
   /** deterministic pre-ranking keeps the top N candidates for the agent */
   preRankTopN: number
+  /** how many top candidates the full-text preflight tries before giving up */
+  maxSelectionAttempts: number
+  /** minimum knowledge goals covered before a stage can advance */
+  minKnowledgeCoverage: number
   /** retrieval pool configuration (recent / landmark) */
   retrieval: RetrievalConfig
   ranking: RankingWeights
@@ -119,17 +143,19 @@ export interface LiteratureConfig {
 export const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
   recency: 0.15,
   impact: 0.15,
-  topicSimilarity: 0.2,
-  fulltextAvailability: 0.2,
-  stageRelevance: 0.3,
+  topicSimilarity: 0.15,
+  fulltextAvailability: 0.15,
+  stageRelevance: 0.25,
+  knowledgeGap: 0.15,
 }
 
 export const DEFAULT_AGENT_RANKING_WEIGHTS: AgentRankingWeights = {
-  relevance: 0.35,
-  learningValue: 0.25,
+  relevance: 0.3,
+  learningValue: 0.2,
   representativeness: 0.15,
   novelty: 0.1,
   stageRelevance: 0.15,
+  curriculumValue: 0.1,
 }
 
 /** Default topic: Chinese display name, English academic queries. */
@@ -192,6 +218,15 @@ export const DEFAULT_STAGES: StageDef[] = [
       'inverted pendulum walking control',
       'virtual model control locomotion'
     ],
+    knowledgeGoals: [
+      { id: 'template_dynamics', label: 'template / simplified dynamics', keywords: ['template model', 'inverted pendulum', 'lipm', 'slip', 'spring loaded', 'centroidal', 'zmp', 'simplified model'] },
+      { id: 'balance_stability', label: 'balance and stability', keywords: ['balance', 'stability', 'push recovery', 'capture point', 'postural', 'equilibrium'] },
+      { id: 'contact_force', label: 'contact / force control', keywords: ['contact force', 'ground reaction', 'grf', 'force control', 'friction cone', 'wrench', 'reaction force'] },
+      { id: 'impedance_compliance', label: 'impedance / compliance', keywords: ['impedance', 'compliance', 'stiffness', 'damping', 'virtual spring', 'compliant'] },
+      { id: 'whole_body', label: 'whole-body locomotion control', keywords: ['whole-body control', 'whole body control', 'whole body dynamics', 'full body control', 'wbc'] },
+    ],
+    landmarkSeeds: [],
+    curriculumWeight: 0.35,
   },
   {
     label: '动力学/接触控制',
@@ -214,6 +249,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'dynamic biped walking control',
       'force distribution legged robot'
     ],
+    knowledgeGoals: [
+      { id: 'contact_distribution', label: 'contact force distribution', keywords: ['contact force', 'force distribution', 'grf', 'wrench', 'friction cone'] },
+      { id: 'whole_body_dynamics', label: 'whole-body dynamics', keywords: ['whole-body control', 'inverse dynamics', 'full body', 'wbc'] },
+    ],
+    landmarkSeeds: [],
   },
   {
     label: 'MPC',
@@ -234,6 +274,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'centroidal dynamics mpc biped',
       'receding horizon legged robot control'
     ],
+    knowledgeGoals: [
+      { id: 'centroidal_mpc', label: 'centroidal dynamics MPC', keywords: ['centroidal', 'model predictive control', 'mpc'] },
+      { id: 'trajectory_optimization', label: 'trajectory optimization', keywords: ['trajectory optimization', 'convex optimization', 'qp', 'sqp', 'receding horizon'] },
+    ],
+    landmarkSeeds: [],
   },
   {
     label: 'RL locomotion',
@@ -253,6 +298,12 @@ export const DEFAULT_STAGES: StageDef[] = [
       'reward design legged locomotion',
       'learning bipedal walking'
     ],
+    knowledgeGoals: [
+      { id: 'policy_learning', label: 'policy learning', keywords: ['reinforcement learning', 'policy gradient', 'ppo', 'actor-critic'] },
+      { id: 'reward_design', label: 'reward design', keywords: ['reward', 'shaping', 'curriculum'] },
+      { id: 'sim2real_rl', label: 'sim-to-real transfer', keywords: ['sim-to-real', 'domain randomization', 'zero-shot'] },
+    ],
+    landmarkSeeds: [],
   },
   {
     label: '鲁棒控制',
@@ -272,6 +323,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'disturbance rejection quadruped',
       'legged robot fall recovery'
     ],
+    knowledgeGoals: [
+      { id: 'push_recovery', label: 'push recovery', keywords: ['push recovery', 'capture point', 'recovery'] },
+      { id: 'disturbance_rejection', label: 'disturbance rejection', keywords: ['disturbance', 'robust', 'perturbation', 'rejection'] },
+    ],
+    landmarkSeeds: [],
   },
   {
     label: 'terrain adaptation',
@@ -291,6 +347,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'parkour legged robot',
       'elevation mapping legged locomotion'
     ],
+    knowledgeGoals: [
+      { id: 'rough_terrain', label: 'rough terrain locomotion', keywords: ['terrain', 'rough', 'stairs', 'slope', 'parkour'] },
+      { id: 'perception_mapping', label: 'perception / elevation mapping', keywords: ['perception', 'elevation map', 'point cloud', 'exteroception'] },
+    ],
+    landmarkSeeds: [],
   },
   {
     label: 'sim-to-real',
@@ -309,6 +370,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'simulation to reality legged robot',
       'hardware deployment legged locomotion'
     ],
+    knowledgeGoals: [
+      { id: 'domain_randomization', label: 'domain randomization', keywords: ['domain randomization', 'randomization'] },
+      { id: 'zero_shot_deploy', label: 'zero-shot deployment', keywords: ['zero-shot', 'deployment', 'real robot', 'hardware'] },
+    ],
+    landmarkSeeds: [],
   },
   {
     label: '前沿方法',
@@ -327,6 +393,11 @@ export const DEFAULT_STAGES: StageDef[] = [
       'vision language model robot control',
       'generalist robot locomotion'
     ],
+    knowledgeGoals: [
+      { id: 'foundation_models', label: 'foundation models', keywords: ['foundation model', 'large language model', 'vision-language'] },
+      { id: 'generative_policies', label: 'generative / world-model policies', keywords: ['diffusion policy', 'world model', 'generative'] },
+    ],
+    landmarkSeeds: [],
   },
 ]
 
@@ -363,7 +434,10 @@ export function defaultConfig(): LiteratureConfig {
     })),
     targetPapersPerStage: 3,
     stageRelevanceThreshold: 0.6,
+    curriculumValueThreshold: 0.5,
     preRankTopN: 15,
+    maxSelectionAttempts: 6,
+    minKnowledgeCoverage: 3,
     retrieval: { ...DEFAULT_RETRIEVAL },
     ranking: { ...DEFAULT_RANKING_WEIGHTS },
     agentRanking: { ...DEFAULT_AGENT_RANKING_WEIGHTS },
@@ -438,7 +512,10 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
     stageOrder: base.stageOrder.map((s) => ({ ...s })),
     targetPapersPerStage: pickNumber(partial, 'targetPapersPerStage', base.targetPapersPerStage),
     stageRelevanceThreshold: pickNumber(partial, 'stageRelevanceThreshold', base.stageRelevanceThreshold),
+    curriculumValueThreshold: pickNumber(partial, 'curriculumValueThreshold', base.curriculumValueThreshold),
     preRankTopN: pickNumber(partial, 'preRankTopN', base.preRankTopN),
+    maxSelectionAttempts: pickNumber(partial, 'maxSelectionAttempts', base.maxSelectionAttempts),
+    minKnowledgeCoverage: pickNumber(partial, 'minKnowledgeCoverage', base.minKnowledgeCoverage),
     retrieval: { ...base.retrieval },
     ranking: { ...base.ranking },
     agentRanking: { ...base.agentRanking },
@@ -478,6 +555,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
         base.ranking.fulltextAvailability,
       ),
       stageRelevance: pickNumber(partial.ranking, 'stageRelevance', base.ranking.stageRelevance),
+      knowledgeGap: pickNumber(partial.ranking, 'knowledgeGap', base.ranking.knowledgeGap),
     }
   }
   if (isRecord(partial.agentRanking)) {
@@ -498,6 +576,11 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
         partial.agentRanking,
         'stageRelevance',
         base.agentRanking.stageRelevance,
+      ),
+      curriculumValue: pickNumber(
+        partial.agentRanking,
+        'curriculumValue',
+        base.agentRanking.curriculumValue,
       ),
     }
   }

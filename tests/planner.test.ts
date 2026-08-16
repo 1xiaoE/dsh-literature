@@ -16,9 +16,9 @@ import {
   landmarkEligibility,
   planQueries,
   resolveTopic,
-  venueBonus,
 } from '../src/lib/planner.js'
-import { preRank, stageRelevanceHint } from '../src/lib/ranking.js'
+import { venueBonus } from '../src/lib/ranking.js'
+import { curriculumHint, knowledgeGapHint, landmarkConfidence, preRank, stageRelevanceHint } from '../src/lib/ranking.js'
 import { SourceRegistry } from '../src/sources/registry.js'
 import type { PaperRef, SearchHit, SearchParams, SourceAdapter } from '../src/sources/types.js'
 
@@ -289,5 +289,42 @@ describe('fundamentals stage ranking', () => {
     for (const t of top10) {
       expect(fundamentalsTitles.has(t.r.title)).toBe(true)
     }
+  })
+})
+
+describe('curriculum / landmark / knowledge-gap (V0.3)', () => {
+  it('curriculum hint penalizes application case studies and rewards centrality', () => {
+    const core = curriculumHint(
+      'A general template model for legged locomotion control with inverted pendulum and ZMP walking pattern generation',
+      'The International Journal of Robotics Research',
+    )
+    expect(core.score).toBeGreaterThan(0.6)
+    const caseStudy = curriculumHint(
+      'Design of a case study prototype platform for a specific warehouse robot application',
+      'Some Local Journal',
+    )
+    expect(caseStudy.score).toBeLessThan(core.score)
+    expect(caseStudy.score).toBeLessThan(0.5)
+  })
+
+  it('landmark confidence is 1.0 for curated seeds and lower otherwise', () => {
+    expect(
+      landmarkConfidence({ eligibilityScore: 0.4, stageHint: 0.5, impact: 0.8, venue: 0, seedMatch: true }),
+    ).toBe(1)
+    const noSeed = landmarkConfidence({ eligibilityScore: 0.4, stageHint: 0.5, impact: 0.8, venue: 0, seedMatch: false })
+    expect(noSeed).toBeGreaterThan(0)
+    expect(noSeed).toBeLessThan(1)
+  })
+
+  it('knowledge gap hint matches only uncovered goals', () => {
+    const goals = [
+      { id: 'a', label: 'template dynamics', keywords: ['inverted pendulum', 'template model'] },
+      { id: 'b', label: 'contact force', keywords: ['contact force', 'ground reaction'] },
+    ]
+    const r = knowledgeGapHint('Inverted pendulum balance with ground reaction force control', goals)
+    expect(r.matched).toEqual(['a', 'b'])
+    expect(r.score).toBe(2)
+    const r2 = knowledgeGapHint('Neural network policy for parkour', goals)
+    expect(r2.matched).toEqual([])
   })
 })

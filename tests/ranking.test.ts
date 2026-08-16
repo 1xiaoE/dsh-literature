@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { defaultConfig, currentYear } from '../src/config.js'
-import { agentFinalScore, impactScore, preRank, recencyScore, stageRelevanceHint, topicSimilarity } from '../src/lib/ranking.js'
+import { agentFinalScore, curriculumHint, impactScore, knowledgeGapHint, landmarkConfidence, preRank, recencyScore, stageRelevanceHint, topicSimilarity } from '../src/lib/ranking.js'
 import { recordPaperInStage, ensureStage, getStage } from '../src/lib/stages.js'
 import { openDb, type Db } from '../src/db.js'
 import { startPush, getPush } from '../src/lib/history.js'
@@ -45,7 +45,7 @@ describe('ranking', () => {
 
     const zeroWeights = {
       ...cfg,
-      ranking: { recency: 0, impact: 0, topicSimilarity: 0, fulltextAvailability: 0, stageRelevance: 0 },
+      ranking: { recency: 0, impact: 0, topicSimilarity: 0, fulltextAvailability: 0, stageRelevance: 0, knowledgeGap: 0 },
     }
     const zero = preRank(
       { title: 'Legged Robot Control via MPC', year: now, citations: 500, fulltextAvailable: true },
@@ -64,12 +64,13 @@ describe('ranking', () => {
         representativeness: 0.4,
         novelty: 0.2,
         stageRelevance: 0.9,
+        curriculumValue: 0.7,
       },
       cfg,
     )
     const w = cfg.agentRanking
     expect(s).toBeCloseTo(
-      w.relevance * 0.8 + w.learningValue * 0.6 + w.representativeness * 0.4 + w.novelty * 0.2 + w.stageRelevance * 0.9,
+      w.relevance * 0.8 + w.learningValue * 0.6 + w.representativeness * 0.4 + w.novelty * 0.2 + w.stageRelevance * 0.9 + w.curriculumValue * 0.7,
     )
   })
 
@@ -98,10 +99,10 @@ describe('stages', () => {
   it('advances only when target reached', () => {
     const { db, dir } = tempDb()
     ensureStage(db, '足式机器人控制', 2)
-    const r1 = recordPaperInStage(db, '足式机器人控制', { targetPapers: 2 })
+    const r1 = recordPaperInStage(db, '足式机器人控制', { targetPapers: 2, minCoverage: 1, coveredGoals: ['g1'] })
     expect(r1.advanced).toBe(false)
     expect(getStage(db, '足式机器人控制').papersInStage).toBe(1)
-    const r2 = recordPaperInStage(db, '足式机器人控制', { targetPapers: 2 })
+    const r2 = recordPaperInStage(db, '足式机器人控制', { targetPapers: 2, minCoverage: 1, coveredGoals: ['g2'] })
     expect(r2.advanced).toBe(true)
     expect(getStage(db, '足式机器人控制').current).toBe(2)
     expect(getStage(db, '足式机器人控制').papersInStage).toBe(0)
@@ -112,7 +113,7 @@ describe('stages', () => {
   it('force advance skips the gate', () => {
     const { db, dir } = tempDb()
     ensureStage(db, 't', 5)
-    const r = recordPaperInStage(db, 't', { targetPapers: 5, forceAdvance: true })
+    const r = recordPaperInStage(db, 't', { targetPapers: 5, minCoverage: 3, forceAdvance: true })
     expect(r.advanced).toBe(true)
     expect(getStage(db, 't').current).toBe(2)
     db.close()
@@ -122,9 +123,24 @@ describe('stages', () => {
   it('duplicate picks do not count toward progress', () => {
     const { db, dir } = tempDb()
     ensureStage(db, 't', 2)
-    const r = recordPaperInStage(db, 't', { targetPapers: 2, duplicate: true })
+    const r = recordPaperInStage(db, 't', { targetPapers: 2, minCoverage: 1, duplicate: true })
     expect(r.advanced).toBe(false)
     expect(getStage(db, 't').papersInStage).toBe(0)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('does not advance without minimum knowledge coverage', () => {
+    const { db, dir } = tempDb()
+    ensureStage(db, 't', 2)
+    // two papers but zero goals covered — coverage gate blocks advancement
+    recordPaperInStage(db, 't', { targetPapers: 2, minCoverage: 2, coveredGoals: [] })
+    const r2 = recordPaperInStage(db, 't', { targetPapers: 2, minCoverage: 2, coveredGoals: [] })
+    expect(r2.advanced).toBe(false)
+    expect(getStage(db, 't').current).toBe(1)
+    // with coverage met, it advances
+    const r3 = recordPaperInStage(db, 't', { targetPapers: 2, minCoverage: 2, coveredGoals: ['g1', 'g2'] })
+    expect(r3.advanced).toBe(true)
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })

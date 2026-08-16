@@ -117,6 +117,14 @@ interface SourceAdapter {
 - **Semantic Scholar 暂缓**（留接口，不实现）。
 - `registry.ts` 负责注册、并行检索、按 `doi`/`arxiv_id`/`title` 规范化去重合并；业务逻辑不得散落具体 API 调用。
 
+## 3c. Curriculum Value 与 Knowledge Coverage（V0.3）
+
+- **curriculum_value**：回答"对系统学习当前阶段，这篇论文是否核心/代表性/值得优先读"。agent 评分（foundational importance / method centrality / learning value / representativeness / prerequisite suitability；过于具体的应用/机构设计案例低分）；程序侧给 `curriculum_hint`（centrality 关键词 + 顶级 venue 加分，case-study 词减分）。Fundamentals 阶段 `curriculumWeight=0.35` 提高权重。门槛 `curriculumValueThreshold=0.5`，与 stage_relevance 门控并列强制。
+- **Knowledge goals**：每阶段 `knowledgeGoals[{id,label,keywords}]`；Fundamentals 定义 template dynamics / balance & stability / contact & force / impedance & compliance / whole-body locomotion 5 个目标。成功精读论文由 agent 标记覆盖的 goals（`knowledge_coverage` 表 + `stages.covered_goals`）；候选带 `knowledgeGapHint`（未覆盖 goal 的关键词命中数，进入预排序权重）。
+- **阶段推进**：`papers_in_stage >= target` 且 `coveredGoals >= minKnowledgeCoverage`（默认 3）双条件满足才推进；`advanceStage=true` 强制。
+- **全文选择协议**：语义排序后按排名依次 `literature_pdf_preflight`（有界探测，不落盘）；取排名最高且 quality gates + fulltext 均达标的论文；选择轨迹落库 `selection_rank/selection_outcome/selection_rejection_reason`（如 rank1: FULLTEXT_UNAVAILABLE → rank2: SELECTED）。所有达标候选均无全文才 `fulltext_unavailable`。禁止"Top 1 无全文 → 整轮失败"，也禁止"PDF 可得就选低质量论文"。
+- **Landmark 增强**：`landmark_confidence`（seeds→1.0，否则 eligibility/impact/venue/hint 合成）+ `methodological_centrality`（agent 评分）；`StageDef.landmarkSeeds` 支持每阶段配置少量 curated seeds（接口就绪，暂不建大表）。
+
 ## 4. 两阶段 Ranking（调整 3）与 Stage Relevance（约束）
 
 - 每个阶段带 `StageDef`：`label` / `scope` / `preferredKeywords` / `downweightKeywords` / `excludeKeywords`。

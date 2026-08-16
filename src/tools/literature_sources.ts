@@ -14,11 +14,19 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { upsertPaper, type PaperRow } from '../db.js'
-import { preRank, stageRelevanceHint, type PreRankResult, type StageRelevanceResult } from '../lib/ranking.js'
+import {
+  preRank,
+  stageRelevanceHint,
+  curriculumHint,
+  landmarkConfidence,
+  knowledgeGapHint,
+  type PreRankResult,
+  type StageRelevanceResult,
+} from '../lib/ranking.js'
 import { currentYear, type TopicDef } from '../config.js'
 import { seenPaperIds, startPush } from '../lib/history.js'
 import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
-import { planQueries, resolveTopic, applyNegativeFilter } from '../lib/planner.js'
+import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility } from '../lib/planner.js'
 import type { PaperRef, PlannedQuery } from '../sources/types.js'
 import { canonicalId } from '../sources/types.js'
 import { mergeWithLabels, type RetrievalProvenance } from '../sources/registry.js'
@@ -41,6 +49,9 @@ export interface SourcesOutput {
   stageDownweightKeywords: string[]
   stageExcludeKeywords: string[]
   stageRelevanceThreshold: number
+  curriculumValueThreshold: number
+  coveredGoals: string[]
+  uncoveredGoals: Array<{ id: string; label: string }>
   queriesGenerated: Array<{ text: string; kind: string; pool: string }>
   rawCount: number
   dedupedCount: number
@@ -71,6 +82,10 @@ export interface SourcesOutput {
     stageExcluded: boolean
     matchedPreferred: string[]
     matchedDownweight: string[]
+    curriculumHint: number
+    landmarkConfidence: number
+    knowledgeGapHint: number
+    knowledgeGapGoals: string[]
     retrieval: Array<{ source: string; query: string; score?: number }>
     rankHint: number
   }>
@@ -162,6 +177,20 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           stageDownweightKeywords: { type: 'array', items: { type: 'string' }, required: true },
           stageExcludeKeywords: { type: 'array', items: { type: 'string' }, required: true },
           stageRelevanceThreshold: { type: 'number', required: true },
+          curriculumValueThreshold: { type: 'number', required: true },
+          coveredGoals: { type: 'array', items: { type: 'string' }, required: true },
+          uncoveredGoals: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                label: { type: 'string', required: true },
+              },
+            },
+          },
           queriesGenerated: {
             type: 'array',
             required: true,
@@ -210,6 +239,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 stageExcluded: { type: 'boolean', required: true },
                 matchedPreferred: { type: 'array', items: { type: 'string' }, required: true },
                 matchedDownweight: { type: 'array', items: { type: 'string' }, required: true },
+                curriculumHint: { type: 'number', required: true },
+                landmarkConfidence: { type: 'number', required: true },
+                knowledgeGapHint: { type: 'number', required: true },
+                knowledgeGapGoals: { type: 'array', items: { type: 'string' }, required: true },
                 retrieval: {
                   type: 'array',
                   required: true,
@@ -255,6 +288,8 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       }
       const stage = getStage(db, topic.id)
       const def = stageDef(cfg.stageOrder, stage.current)
+      const covered = new Set(stage.coveredGoals)
+      const uncoveredGoals = (def?.knowledgeGoals ?? []).filter((g) => !covered.has(g.id))
 
       // --- planner: queries per pool ---
       const recentQueries = planQueries(topic, def, 'recent')
@@ -313,6 +348,9 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         pool: 'recent' | 'landmark'
         pre: PreRankResult
         sr: StageRelevanceResult
+        curriculum: number
+        landmarkConf: number
+        gapGoals: string[]
         isSeen: boolean
         prov: RetrievalProvenance[]
       }> = []
@@ -320,9 +358,25 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         const id = canonicalId(paper)
         upsertPaper(db, paperToRow(paper))
         const isSeen = seen.has(id)
+        const text = `${paper.title} ${paper.abstract ?? ''}`
         const sr = def
-          ? stageRelevanceHint(`${paper.title} ${paper.abstract ?? ''}`, def)
+          ? stageRelevanceHint(text, def)
           : { score: 0.5, excluded: false, matchedPreferred: [], matchedDownweight: [] }
+        const ch = curriculumHint(text, paper.venue)
+        const gap = knowledgeGapHint(text, uncoveredGoals)
+        const el = landmarkEligibility(
+          { citations: paper.citations, venue: paper.venue, stageHint: sr.score, stageMatched: sr.matchedPreferred.length },
+          cfg,
+        )
+        const lc = landmarkConfidence({
+          eligibilityScore: el.score,
+          stageHint: sr.score,
+          impact: paper.citations !== undefined ? Math.min(1, Math.log10(paper.citations + 1) / 3) : 0,
+          venue: paper.venue ? 1 : 0,
+          seedMatch: (def?.landmarkSeeds ?? []).some((seed) =>
+            seed === paper.doi || seed === paper.arxivId || paper.title.toLowerCase().includes(seed.toLowerCase()),
+          ),
+        })
         const pre = preRank(
           {
             title: paper.title,
@@ -331,6 +385,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             citations: paper.citations,
             fulltextAvailable: quickPdfAvailability(paper),
             stageRelevance: sr.score,
+            knowledgeGap: uncoveredGoals.length > 0 ? gap.score / uncoveredGoals.length : 0,
           },
           cfg,
           now,
@@ -341,7 +396,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           offTopicDropped += 1
           continue
         }
-        rows.push({ paper, pool, pre, sr, isSeen, prov })
+        rows.push({ paper, pool, pre, sr, curriculum: ch.score, landmarkConf: lc, gapGoals: gap.matched, isSeen, prov })
         if (prov.length > 0) {
           for (const p of prov) {
             insertRetrieval.run(pushId, id, p.query, p.source, p.retrievalScore, pool)
@@ -387,6 +442,9 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         stageDownweightKeywords: def?.downweightKeywords ?? [],
         stageExcludeKeywords: def?.excludeKeywords ?? [],
         stageRelevanceThreshold: cfg.stageRelevanceThreshold,
+        curriculumValueThreshold: cfg.curriculumValueThreshold,
+        coveredGoals: [...covered],
+        uncoveredGoals: uncoveredGoals.map((g) => ({ id: g.id, label: g.label })),
         queriesGenerated: [...recentQueries, ...landmarkQueries].map((q) => ({
           text: q.text,
           kind: q.kind,
@@ -399,7 +457,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         negativeDropped,
         offTopicDropped,
         total: rows.length,
-        candidates: topN.map(({ paper, pool, pre, sr, isSeen, prov }, i) =>
+        candidates: topN.map(({ paper, pool, pre, sr, curriculum, landmarkConf, gapGoals, isSeen, prov }, i) =>
           clean({
             paperId: canonicalId(paper),
             title: paper.title,
@@ -422,6 +480,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             stageExcluded: sr.excluded,
             matchedPreferred: sr.matchedPreferred,
             matchedDownweight: sr.matchedDownweight,
+            curriculumHint: curriculum,
+            landmarkConfidence: landmarkConf,
+            knowledgeGapHint: uncoveredGoals.length > 0 ? gapGoals.length / uncoveredGoals.length : 0,
+            knowledgeGapGoals: gapGoals,
             retrieval: prov.map((p) =>
               clean({
                 source: p.source,

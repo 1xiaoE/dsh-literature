@@ -11,6 +11,7 @@ import { normalizeConfig, type LiteratureConfig } from './config.js'
 import { createRuntime, type LiteratureRuntime } from './lib/runtime.js'
 import { defineLiteratureSources } from './tools/literature_sources.js'
 import { defineLiteratureFetchPdf } from './tools/literature_fetch_pdf.js'
+import { defineLiteraturePdfPreflight } from './tools/literature_pdf_preflight.js'
 import { defineLiteratureFulltextIndex } from './tools/literature_fulltext_index.js'
 import { defineLiteratureFulltextRead } from './tools/literature_fulltext_read.js'
 import { defineLiteratureRecord } from './tools/literature_record.js'
@@ -49,6 +50,7 @@ export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
   for (const tool of [
     defineLiteratureSources(getRt),
     defineLiteratureFetchPdf(getRt),
+    defineLiteraturePdfPreflight(getRt),
     defineLiteratureFulltextIndex(getRt),
     defineLiteratureFulltextRead(getRt),
     defineLiteratureRecord(getRt, modelRoute),
