@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 export type Db = DatabaseSync
 
@@ -128,10 +128,15 @@ CREATE TABLE IF NOT EXISTS stages (
   topic           TEXT PRIMARY KEY,
   current         INTEGER NOT NULL DEFAULT 1,
   papers_in_stage INTEGER NOT NULL DEFAULT 0,
-  target_papers   INTEGER NOT NULL DEFAULT 2,
+  target_papers   INTEGER NOT NULL DEFAULT 3,
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `)
+  if (version < 2) {
+    // stage relevance: deterministic hint (program) + agent-assigned score
+    db.exec('ALTER TABLE candidates ADD COLUMN stage_relevance_hint REAL;')
+    db.exec('ALTER TABLE candidates ADD COLUMN stage_relevance_score REAL;')
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }
 

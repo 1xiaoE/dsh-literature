@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   impact_score         REAL,
   topic_similarity     REAL,
   fulltext_available   INTEGER NOT NULL DEFAULT 0,
+  stage_relevance_hint REAL,                      -- deterministic hint (program)
+  stage_relevance_score REAL,                     -- agent-assigned (semantic ranking)
   relevance_score      REAL,                      -- agent semantic ranking trace
   learning_value_score REAL,
   representative_score REAL,
@@ -89,9 +91,9 @@ CREATE TABLE IF NOT EXISTS fulltext_chunks (
 CREATE TABLE IF NOT EXISTS stages (
   topic           TEXT PRIMARY KEY,
   current         INTEGER NOT NULL DEFAULT 1,
-  papers_in_stage INTEGER NOT NULL DEFAULT 0,     -- completed picks in the current stage
-  target_papers   INTEGER NOT NULL DEFAULT 2,     -- advance gate (config override)
+  papers_in_stage INTEGER NOT NULL DEFAULT 0,     -- stage-matched completed picks in the current stage
+  target_papers   INTEGER NOT NULL DEFAULT 3,     -- advance gate (config override)
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;

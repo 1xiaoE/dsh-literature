@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { defaultConfig, currentYear } from '../src/config.js'
-import { agentFinalScore, impactScore, preRank, recencyScore, topicSimilarity } from '../src/lib/ranking.js'
+import { agentFinalScore, impactScore, preRank, recencyScore, stageRelevanceHint, topicSimilarity } from '../src/lib/ranking.js'
 import { recordPaperInStage, ensureStage, getStage } from '../src/lib/stages.js'
 import { openDb, type Db } from '../src/db.js'
 import { startPush, getPush } from '../src/lib/history.js'
@@ -58,11 +58,34 @@ describe('ranking', () => {
   it('agent final score is weighted', () => {
     const cfg = defaultConfig()
     const s = agentFinalScore(
-      { relevance: 0.8, learningValue: 0.6, representativeness: 0.4, novelty: 0.2 },
+      {
+        relevance: 0.8,
+        learningValue: 0.6,
+        representativeness: 0.4,
+        novelty: 0.2,
+        stageRelevance: 0.9,
+      },
       cfg,
     )
     const w = cfg.agentRanking
-    expect(s).toBeCloseTo(w.relevance * 0.8 + w.learningValue * 0.6 + w.representativeness * 0.4 + w.novelty * 0.2)
+    expect(s).toBeCloseTo(
+      w.relevance * 0.8 + w.learningValue * 0.6 + w.representativeness * 0.4 + w.novelty * 0.2 + w.stageRelevance * 0.9,
+    )
+  })
+
+  it('stage relevance hint reacts to preferred/downweight keywords', () => {
+    const cfg = defaultConfig()
+    const stage = cfg.stageOrder[0]! // 基础控制
+    const good = stageRelevanceHint('Bipedal walking pattern generation with inverted pendulum and ZMP', stage)
+    expect(good.score).toBeGreaterThan(0.5)
+    expect(good.matchedPreferred.length).toBeGreaterThan(0)
+
+    const mixed = stageRelevanceHint(
+      'Reinforcement learning with model predictive control for parkour locomotion',
+      stage,
+    )
+    expect(mixed.score).toBeLessThan(good.score)
+    expect(mixed.matchedDownweight.length).toBeGreaterThan(0)
   })
 })
 

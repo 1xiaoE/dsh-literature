@@ -71,6 +71,13 @@ export function defineLiteratureFulltextIndex(getRt: () => LiteratureRuntime) {
         .get(args.paperId) as { pdf_path: string | null } | undefined
 
       if (!fetchRow?.pdf_path) {
+        // provenance: record the unavailable outcome explicitly
+        rt.db.prepare(
+          `INSERT INTO fulltexts (paper_id, status, parser, char_count, chunk_count)
+           VALUES (?, 'unavailable', 'none', 0, 0)
+           ON CONFLICT(paper_id) DO UPDATE SET status='unavailable', parser='none',
+             char_count=0, chunk_count=0, analyzed_at=datetime('now')`,
+        ).run(args.paperId)
         return {
           paperId: args.paperId,
           status: 'unavailable',

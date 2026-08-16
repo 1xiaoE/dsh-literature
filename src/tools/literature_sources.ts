@@ -7,10 +7,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { upsertPaper, type PaperRow } from '../db.js'
-import { preRank, type PreRankResult } from '../lib/ranking.js'
+import { preRank, stageRelevanceHint, type PreRankResult, type StageRelevanceResult } from '../lib/ranking.js'
 import { currentYear } from '../config.js'
 import { seenPaperIds, startPush } from '../lib/history.js'
-import { ensureStage, getStage, stageLabel } from '../lib/stages.js'
+import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
 import type { PaperRef } from '../sources/types.js'
 import { canonicalId } from '../sources/types.js'
 
@@ -26,6 +26,11 @@ export interface SourcesOutput {
   topic: string
   stage: number
   stageLabel: string
+  stageScope: string
+  stagePreferredKeywords: string[]
+  stageDownweightKeywords: string[]
+  stageExcludeKeywords: string[]
+  stageRelevanceThreshold: number
   total: number
   candidates: Array<{
     paperId: string
@@ -44,6 +49,10 @@ export interface SourcesOutput {
     impactScore: number
     topicSimilarity: number
     preRankScore: number
+    stageRelevanceHint: number
+    stageExcluded: boolean
+    matchedPreferred: string[]
+    matchedDownweight: string[]
     rankHint: number
   }>
 }
@@ -128,6 +137,11 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           topic: { type: 'string', required: true },
           stage: { type: 'integer', required: true },
           stageLabel: { type: 'string', required: true },
+          stageScope: { type: 'string', required: true },
+          stagePreferredKeywords: { type: 'array', items: { type: 'string' }, required: true },
+          stageDownweightKeywords: { type: 'array', items: { type: 'string' }, required: true },
+          stageExcludeKeywords: { type: 'array', items: { type: 'string' }, required: true },
+          stageRelevanceThreshold: { type: 'number', required: true },
           total: { type: 'integer', required: true },
           candidates: {
             type: 'array',
@@ -152,6 +166,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
                 impactScore: { type: 'number', required: true },
                 topicSimilarity: { type: 'number', required: true },
                 preRankScore: { type: 'number', required: true },
+                stageRelevanceHint: { type: 'number', required: true },
+                stageExcluded: { type: 'boolean', required: true },
+                matchedPreferred: { type: 'array', items: { type: 'string' }, required: true },
+                matchedDownweight: { type: 'array', items: { type: 'string' }, required: true },
                 rankHint: { type: 'number', required: true },
               },
             },
@@ -161,11 +179,11 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       render: (_args, value: SourcesOutput) => [
         {
           type: 'text',
-          text: `push #${value.pushId} 主题「${value.topic}」阶段「${value.stageLabel}」：共 ${value.total} 篇候选，预排序 Top ${value.candidates.length}：\n` +
+          text: `push #${value.pushId} 主题「${value.topic}」阶段「${value.stageLabel}」（阈值 ${value.stageRelevanceThreshold}）：共 ${value.total} 篇候选，预排序 Top ${value.candidates.length}：\n` +
             value.candidates
               .map(
                 (c, i) =>
-                  `${i + 1}. [${c.isSeen ? '已读' : '新'}] ${c.title} (${c.year ?? '?'}, 引用 ${c.citations ?? '?'}, 预排序 ${c.preRankScore.toFixed(3)}, 全文可得 ${c.fulltextAvailable})`,
+                  `${i + 1}. [${c.isSeen ? '已读' : '新'}${c.stageExcluded ? '✗阶段排除' : ''}] ${c.title} (${c.year ?? '?'}, 引用 ${c.citations ?? '?'}, 预排序 ${c.preRankScore.toFixed(3)}, 阶段契合 ${c.stageRelevanceHint.toFixed(2)}, 全文 ${c.fulltextAvailable})`,
               )
               .join('\n'),
         },
@@ -184,6 +202,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         pushId = startPush(db, topic, stage.current).pushId
       }
       const stage = getStage(db, topic)
+      const def = stageDef(cfg.stageOrder, stage.current)
 
       const papers = await rt.registry.search({ topic, years, limit })
       const seen = seenPaperIds(db, topic)
@@ -192,15 +211,21 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       const insertCandidate = db.prepare(
         `INSERT INTO candidates
            (push_id, paper_id, rank_hint, picked, recency_score, impact_score,
-            topic_similarity, fulltext_available, is_seen)
-         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?)
+            topic_similarity, fulltext_available, stage_relevance_hint, is_seen)
+         VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(push_id, paper_id) DO UPDATE SET
            recency_score=excluded.recency_score, impact_score=excluded.impact_score,
            topic_similarity=excluded.topic_similarity,
-           fulltext_available=excluded.fulltext_available, is_seen=excluded.is_seen`,
+           fulltext_available=excluded.fulltext_available,
+           stage_relevance_hint=excluded.stage_relevance_hint, is_seen=excluded.is_seen`,
       )
 
-      const rows: Array<{ paper: PaperRef; pre: PreRankResult; isSeen: boolean }> = []
+      const rows: Array<{
+        paper: PaperRef
+        pre: PreRankResult
+        sr: StageRelevanceResult
+        isSeen: boolean
+      }> = []
       for (const paper of papers) {
         const id = canonicalId(paper)
         upsertPaper(db, paperToRow(paper))
@@ -216,13 +241,16 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           cfg,
           now,
         )
-        rows.push({ paper, pre, isSeen })
+        const sr = def
+          ? stageRelevanceHint(`${paper.title} ${paper.abstract ?? ''}`, def)
+          : { score: 0.5, excluded: false, matchedPreferred: [], matchedDownweight: [] }
+        rows.push({ paper, pre, sr, isSeen })
       }
       rows.sort((a, b) => b.pre.score - a.pre.score)
 
       const topN = rows.slice(0, Math.max(1, cfg.preRankTopN))
       for (let i = 0; i < topN.length; i += 1) {
-        const { paper, pre, isSeen } = topN[i]!
+        const { paper, pre, sr, isSeen } = topN[i]!
         insertCandidate.run(
           pushId,
           canonicalId(paper),
@@ -231,6 +259,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           pre.impactScore,
           pre.topicSimilarity,
           pre.fulltextAvailable ? 1 : 0,
+          sr.score,
           isSeen ? 1 : 0,
         )
       }
@@ -240,8 +269,13 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         topic,
         stage: stage.current,
         stageLabel: stageLabel(cfg.stageOrder, stage.current),
+        stageScope: def?.scope ?? '',
+        stagePreferredKeywords: def?.preferredKeywords ?? [],
+        stageDownweightKeywords: def?.downweightKeywords ?? [],
+        stageExcludeKeywords: def?.excludeKeywords ?? [],
+        stageRelevanceThreshold: cfg.stageRelevanceThreshold,
         total: rows.length,
-        candidates: topN.map(({ paper, pre, isSeen }, i) =>
+        candidates: topN.map(({ paper, pre, sr, isSeen }, i) =>
           clean({
             paperId: canonicalId(paper),
             title: paper.title,
@@ -259,6 +293,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             impactScore: pre.impactScore,
             topicSimilarity: pre.topicSimilarity,
             preRankScore: pre.score,
+            stageRelevanceHint: sr.score,
+            stageExcluded: sr.excluded,
+            matchedPreferred: sr.matchedPreferred,
+            matchedDownweight: sr.matchedDownweight,
             rankHint: i + 1,
           }),
         ),

@@ -102,6 +102,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
       const result = await fetchPdf(rt.db, args.paperId, candidates, rt.pdfsDir, {
         timeoutMs: rt.cfg.http.timeoutMs,
         minPdfBytes: rt.cfg.http.minPdfBytes,
+        fetchImpl: rt.fetchImpl,
       })
       return { paperId: args.paperId, ...result }
     },
