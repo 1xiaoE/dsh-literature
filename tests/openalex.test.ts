@@ -9,6 +9,11 @@
  * - transient 5xx retried a FINITE number of times only;
  * - /rate_limit status parses daily budget/used/remaining/reset without key;
  * - retrieval provenance records auth_mode (anonymous | api_key), never the key.
+ *
+ * Environment isolation: the host shell MAY define a real OPENALEX_API_KEY.
+ * Every anonymous-mode test explicitly stubs the env var away with
+ * vi.stubEnv (and restores it afterwards), so the suite passes both with and
+ * without a host key — without ever reading/printing the real one.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -22,6 +27,9 @@ let logSpy: ReturnType<typeof vi.spyOn> | undefined
 afterEach(() => {
   logSpy?.mockRestore()
   logSpy = undefined
+  // restore any env var stubbed by these tests (never touches the real
+  // OPENALEX_API_KEY outside this file's execution window)
+  vi.unstubAllEnvs()
 })
 
 function spyLogs(): ReturnType<typeof vi.spyOn> {
@@ -68,6 +76,10 @@ describe('OpenAlex API key handling', () => {
   })
 
   it('anonymous mode: no key param, logs openalex_auth_mode=anonymous', async () => {
+    // isolate from any host OPENALEX_API_KEY: remove it for this test,
+    // restore automatically via afterEach → vi.unstubAllEnvs()
+    vi.stubEnv('OPENALEX_API_KEY', undefined)
+    expect(process.env.OPENALEX_API_KEY).toBeUndefined()
     const logs = spyLogs()
     const { fn, urls } = stubFetch([() => ({ status: 200, body: OK_WORKS })])
     const adapter = new OpenAlexAdapter(fn, 5000, undefined, undefined)
@@ -86,6 +98,29 @@ describe('OpenAlex API key handling', () => {
     await adapter.search(PARAMS)
     await adapter.search(PARAMS)
     expect(urls.length).toBe(1)
+  })
+})
+
+describe('host-env isolation (OPENALEX_API_KEY set in the host)', () => {
+  it('anonymous mode stays anonymous even with a host key present; real key never leaks', async () => {
+    // simulate the problematic host: a REAL key in the environment
+    vi.stubEnv('OPENALEX_API_KEY', 'REAL-HOST-KEY-MUST-NOT-LEAK')
+    expect(process.env.OPENALEX_API_KEY).toBe('REAL-HOST-KEY-MUST-NOT-LEAK')
+
+    // explicit isolation for the anonymous test
+    vi.stubEnv('OPENALEX_API_KEY', undefined)
+    const logs = spyLogs()
+    const { fn, urls } = stubFetch([() => ({ status: 200, body: OK_WORKS })])
+    const adapter = new OpenAlexAdapter(fn, 5000, undefined, undefined)
+    expect(adapter.authMode).toBe('anonymous')
+    await adapter.search(PARAMS)
+    expect(urls[0]).not.toContain('api_key=')
+    const logged = logs.mock.calls.map((c) => String(c[0])).join('\n')
+    expect(logged).toContain('openalex_auth_mode=anonymous')
+    // the host key must never appear anywhere observable
+    expect(logged).not.toContain('REAL-HOST-KEY-MUST-NOT-LEAK')
+    expect(JSON.stringify(urls)).not.toContain('REAL-HOST-KEY-MUST-NOT-LEAK')
+    // afterEach restores the original env
   })
 })
 
@@ -159,10 +194,12 @@ describe('fetchOpenAlexRateLimit (status check, no key leakage)', () => {
   })
 
   it('supports anonymous check (no key) and bare field names', async () => {
-    const { fn } = stubFetch([
+    vi.stubEnv('OPENALEX_API_KEY', undefined)
+    const { fn, urls } = stubFetch([
       () => ({ status: 200, body: { budget: 100000, used: 5, remaining: 99995, reset_time: 'x' } }),
     ])
     const info = await fetchOpenAlexRateLimit({ fetchImpl: fn, timeoutMs: 5000 })
+    expect(urls[0]).not.toContain('api_key=')
     expect(info.dailyBudget).toBe(100000)
     expect(info.used).toBe(5)
     expect(info.remaining).toBe(99995)
