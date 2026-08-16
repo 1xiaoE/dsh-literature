@@ -372,7 +372,7 @@ describe('v8 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v8-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(9)
+    expect(version.user_version).toBe(10)
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>
     expect(tables.map((t) => t.name)).toContain('user_actions')
     // CHECK constraint accepts the new status

@@ -86,11 +86,20 @@ export function defineLiteratureFulltextIndex(getRt: () => LiteratureRuntime) {
           chunks: [],
         }
       }
-      return indexFulltext(rt.db, args.paperId, fetchRow.pdf_path, {
+      const t0 = performance.now()
+      const res = await indexFulltext(rt.db, args.paperId, fetchRow.pdf_path, {
         maxChunkChars: rt.cfg.fulltext.maxChunkChars,
         minChars: rt.cfg.fulltext.minChars,
         parserCommand: rt.cfg.fulltext.parserCommand,
       })
+      const pushRow = rt.db
+        .prepare(
+          `SELECT c.push_id FROM candidates c JOIN pushes p ON p.id = c.push_id
+           WHERE c.paper_id = ? AND p.status IN ('running','user_action_required') ORDER BY c.push_id DESC LIMIT 1`,
+        )
+        .get(args.paperId) as { push_id: number } | undefined
+      if (pushRow) rt.perf.add(pushRow.push_id, { parsingMs: performance.now() - t0 })
+      return res
     },
   })
 }

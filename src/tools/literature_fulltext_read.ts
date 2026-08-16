@@ -57,9 +57,13 @@ export function defineLiteratureFulltextRead(getRt: () => LiteratureRuntime) {
     },
     async execute(args: FulltextReadInput): Promise<FulltextReadOutput> {
       const rt = getRt()
+      const t0 = performance.now()
       const chunk = readChunk(rt.db, args.paperId, args.seq)
       if (!chunk) {
         return { paperId: args.paperId, seq: args.seq, found: false }
+      }
+      if (args.pushId !== undefined) {
+        rt.perf.add(args.pushId, { fulltextReadMs: performance.now() - t0 })
       }
       if (args.pushId !== undefined) {
         rt.db

@@ -63,6 +63,11 @@ export interface RecordInput {
   knowledgeGoals?: string[]
   advanceStage?: boolean
   notes?: string
+  /** performance audit (agent-side, reported by the agent) */
+  agentRankingMs?: number
+  reportGenerationMs?: number
+  llmCallCount?: number
+  llmRetryCount?: number
 }
 
 export interface RecordOutput {
@@ -84,6 +89,8 @@ export interface RecordOutput {
   readChunks: number
   readCoverage: number
   coverageBasis: 'full_read' | 'index_exposed' | 'read_log'
+  /** performance audit summary (plugin-timed + agent-reported phases) */
+  perfSummary: Record<string, number>
 }
 
 /**
@@ -142,6 +149,10 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       errorDetail: { type: 'string', description: '失败详情' },
       advanceStage: { type: 'boolean', description: '强制推进到下一阶段（人工切换）' },
       notes: { type: 'string', description: '备注' },
+      agentRankingMs: { type: 'integer', description: '性能审计：语义排序阶段耗时（ms，agent 自报）' },
+      reportGenerationMs: { type: 'integer', description: '性能审计：报告撰写耗时（ms，agent 自报）' },
+      llmCallCount: { type: 'integer', description: '性能审计：本推送 LLM 调用次数（agent 自报；语义排序应批量，目标 1~2 次）' },
+      llmRetryCount: { type: 'integer', description: '性能审计：LLM 重试次数' },
       knowledgeGoals: {
         type: 'array',
         items: { type: 'string' },
@@ -212,12 +223,34 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
             required: true,
             enum: ['full_read', 'index_exposed', 'read_log'],
           },
+          perfSummary: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            properties: {
+              retrievalMs: { type: 'integer' },
+              deterministicRankingMs: { type: 'integer' },
+              agentRankingMs: { type: 'integer' },
+              pdfPreflightMs: { type: 'integer' },
+              pdfDownloadMs: { type: 'integer' },
+              parsingMs: { type: 'integer' },
+              fulltextReadMs: { type: 'integer' },
+              reportGenerationMs: { type: 'integer' },
+              totalMs: { type: 'integer' },
+              rawCandidates: { type: 'integer' },
+              deterministicCandidates: { type: 'integer' },
+              agentScoredCandidates: { type: 'integer' },
+              llmCallCount: { type: 'integer' },
+              llmRetryCount: { type: 'integer' },
+              pdfAttemptCount: { type: 'integer' },
+            },
+          },
         },
       },
       render: (_args, value: RecordOutput) => [
         {
           type: 'text',
-          text: `push #${value.pushId} → ${value.status}；阶段「${value.stageLabel}」进度 ${value.papersInStage}/${value.targetPapers}（覆盖 ${value.coveredGoals.join(',') || '无'}）${value.stageAdvanced ? '（已推进到下一阶段）' : ''}${value.pendingRequiredGoals.length > 0 ? `（required goal pending: ${value.pendingRequiredGoals.join(',')}）` : ''}${value.duplicate ? '（重复推荐，不计进度）' : ''}${value.stageMatched ? '' : '（与当前阶段不匹配，不计进度）'}${value.status === 'completed' ? `；阅读 ${value.readChunks}/${value.totalChunks}（覆盖率 ${value.readCoverage}，basis=${value.coverageBasis}）` : ''}`,
+          text: `push #${value.pushId} → ${value.status}；阶段「${value.stageLabel}」进度 ${value.papersInStage}/${value.targetPapers}（覆盖 ${value.coveredGoals.join(',') || '无'}）${value.stageAdvanced ? '（已推进到下一阶段）' : ''}${value.pendingRequiredGoals.length > 0 ? `（required goal pending: ${value.pendingRequiredGoals.join(',')}）` : ''}${value.duplicate ? '（重复推荐，不计进度）' : ''}${value.stageMatched ? '' : '（与当前阶段不匹配，不计进度）'}${value.status === 'completed' ? `；阅读 ${value.readChunks}/${value.totalChunks}（覆盖率 ${value.readCoverage}，basis=${value.coverageBasis}）` : ''}${value.perfSummary.totalMs ? `；性能：检索${value.perfSummary.retrievalMs}ms/预排序${value.perfSummary.deterministicRankingMs}ms/语义排序${value.perfSummary.agentRankingMs}ms/下载${value.perfSummary.pdfDownloadMs}ms/解析${value.perfSummary.parsingMs}ms/精读${value.perfSummary.fulltextReadMs}ms/报告${value.perfSummary.reportGenerationMs}ms/总计${value.perfSummary.totalMs}ms（LLM ${value.perfSummary.llmCallCount} 次，raw ${value.perfSummary.rawCandidates}，Top ${value.perfSummary.deterministicCandidates}）` : ''}`,
         },
       ],
     },
@@ -463,10 +496,44 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         }
       }
 
+      // --- performance audit flush (plugin phases + agent-reported phases) ---
+      const pushRow2 = db.prepare('SELECT started_at FROM pushes WHERE id = ?').get(args.pushId) as
+        | { started_at: string }
+        | undefined
+      const totalMs = pushRow2?.started_at
+        ? Math.max(0, Date.now() - new Date(`${pushRow2.started_at.replace(' ', 'T')}Z`).getTime())
+        : undefined
+      const scoredCount = args.scores?.length ?? 0
+      const perf = rt.perf.flush(db, args.pushId, {
+        agentRankingMs: args.agentRankingMs,
+        reportGenerationMs: args.reportGenerationMs,
+        agentScoredCandidates: scoredCount || undefined,
+        llmCallCount: args.llmCallCount,
+        llmRetryCount: args.llmRetryCount,
+        totalMs,
+      })
+
       const stage = getStage(db, topic)
       return {
         pushId: args.pushId,
         status: args.status,
+        perfSummary: {
+          retrievalMs: perf.retrievalMs,
+          deterministicRankingMs: perf.deterministicRankingMs,
+          agentRankingMs: perf.agentRankingMs,
+          pdfPreflightMs: perf.pdfPreflightMs,
+          pdfDownloadMs: perf.pdfDownloadMs,
+          parsingMs: perf.parsingMs,
+          fulltextReadMs: perf.fulltextReadMs,
+          reportGenerationMs: perf.reportGenerationMs,
+          totalMs: perf.totalMs,
+          rawCandidates: perf.rawCandidates,
+          deterministicCandidates: perf.deterministicCandidates,
+          agentScoredCandidates: perf.agentScoredCandidates,
+          llmCallCount: perf.llmCallCount,
+          llmRetryCount: perf.llmRetryCount,
+          pdfAttemptCount: perf.pdfAttemptCount,
+        },
         stage: stage.current,
         stageLabel: stageLabel(cfg.stageOrder, stage.current),
         papersInStage: stage.papersInStage,

@@ -315,9 +315,11 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       const recentQueries = planQueries(topic, def, 'recent')
       const landmarkQueries = planQueries(topic, def, 'landmark')
 
-      // --- retrieve both pools independently ---
+      // --- retrieve both pools independently (performance: retrieval phase) ---
+      const tRetrievalStart = performance.now()
       const recent = await rt.registry.searchPool(cfg, recentQueries, def, 'recent')
       const landmark = await rt.registry.searchPool(cfg, landmarkQueries, def, 'landmark')
+      const tRankingStart = performance.now()
 
       // --- negative terms filter (before merge) ---
       const negRecent = applyNegativeFilter(recent.papers, topic.negativeTerms)
@@ -448,6 +450,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         }
       }
       rows.sort((a, b) => b.pre.score - a.pre.score)
+      const tRankingEnd = performance.now()
 
       const topN = rows.slice(0, Math.max(1, cfg.preRankTopN))
       for (let i = 0; i < topN.length; i += 1) {
@@ -466,6 +469,13 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           isSeen ? 1 : 0,
         )
       }
+
+      rt.perf.add(pushId, {
+        retrievalMs: tRankingStart - tRetrievalStart,
+        deterministicRankingMs: tRankingEnd - tRankingStart,
+        rawCandidates: recent.rawCount + landmark.rawCount,
+        deterministicCandidates: rows.length,
+      })
 
       return {
         pushId,

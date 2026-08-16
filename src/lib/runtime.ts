@@ -11,6 +11,7 @@ import { dataDirs, ensureDataDir, expandHome } from './paths.js'
 import { createRegistry, type SourceRegistry } from '../sources/registry.js'
 import { CarsiPdfProvider } from '../providers/carsi.js'
 import type { PdfProvider } from '../providers/types.js'
+import { PerfTracker } from './perf.js'
 
 export interface LiteratureRuntime {
   cfg: LiteratureConfig
@@ -29,6 +30,8 @@ export interface LiteratureRuntime {
   providers: PdfProvider[]
   /** typed CARSI provider handle (session status / login CLI); null when disabled */
   carsi: CarsiPdfProvider | null
+  /** per-push performance accumulator (retrieval/ranking/pdf/read timings) */
+  perf: PerfTracker
 }
 
 export function createRuntime(cfg: LiteratureConfig, opts: { fetchImpl?: typeof fetch } = {}): LiteratureRuntime {
@@ -59,5 +62,6 @@ export function createRuntime(cfg: LiteratureConfig, opts: { fetchImpl?: typeof 
     fetchImpl,
     providers: cfg.carsi.enabled ? [carsi] : [],
     carsi: cfg.carsi.enabled ? carsi : null,
+    perf: new PerfTracker(),
   }
 }

@@ -205,6 +205,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
         }
       }
 
+      const t0 = performance.now()
       const result = await fetchPdf(rt.db, args.paperId, candidates, rt.pdfsDir, {
         timeoutMs: rt.cfg.http.timeoutMs,
         minPdfBytes: rt.cfg.http.minPdfBytes,
@@ -212,6 +213,12 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
         providers,
         paper,
       })
+      if (args.pushId !== undefined) {
+        rt.perf.add(args.pushId, {
+          pdfDownloadMs: performance.now() - t0,
+          pdfAttemptCount: result.attempts.length,
+        })
+      }
       const out: FetchPdfOutput = { paperId: args.paperId, ...result }
       if (capBlocked && result.outcome === 'FULLTEXT_UNAVAILABLE') {
         out.reason = `CARSI 每推送上限已满（carsi.maxPerPush=${rt.cfg.carsi.maxPerPush}），本次未尝试机构授权`

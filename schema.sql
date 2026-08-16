@@ -38,7 +38,22 @@ CREATE TABLE IF NOT EXISTS pushes (
   total_chunks   INTEGER,                         -- full-text reading coverage provenance
   read_chunks    INTEGER,
   read_coverage  REAL,
-  coverage_basis TEXT CHECK (coverage_basis IS NULL OR coverage_basis IN ('full_read','index_exposed','read_log'))
+  coverage_basis TEXT CHECK (coverage_basis IS NULL OR coverage_basis IN ('full_read','index_exposed','read_log')),
+  retrieval_ms INTEGER,                           -- performance audit (ms / counts)
+  deterministic_ranking_ms INTEGER,
+  agent_ranking_ms INTEGER,
+  pdf_preflight_ms INTEGER,
+  pdf_download_ms INTEGER,
+  parsing_ms INTEGER,
+  fulltext_read_ms INTEGER,
+  report_generation_ms INTEGER,
+  total_ms INTEGER,
+  raw_candidates INTEGER,
+  deterministic_candidates INTEGER,
+  agent_scored_candidates INTEGER,
+  llm_call_count INTEGER,
+  llm_retry_count INTEGER,
+  pdf_attempt_count INTEGER
 );
 
 -- Human-in-the-loop (NEED_USER_ACTION): five-part issue record per push.
@@ -161,4 +176,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;

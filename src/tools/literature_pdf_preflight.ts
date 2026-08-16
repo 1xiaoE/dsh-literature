@@ -112,10 +112,22 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
       }
       const paper = rowToRef(row)
       const candidates = await rt.registry.pdfCandidates(paper)
+      const t0 = performance.now()
       const result = await preflightPdf(candidates, {
         timeoutMs: rt.cfg.http.timeoutMs,
         fetchImpl: rt.fetchImpl,
       })
+      const pushId = args.pushId ?? (
+        rt.db
+          .prepare(
+            `SELECT c.push_id FROM candidates c JOIN pushes p ON p.id = c.push_id
+             WHERE c.paper_id = ? AND p.status IN ('running','user_action_required') ORDER BY c.push_id DESC LIMIT 1`,
+          )
+          .get(args.paperId) as { push_id: number } | undefined
+      )?.push_id
+      if (pushId !== undefined) {
+        rt.perf.add(pushId, { pdfPreflightMs: performance.now() - t0 })
+      }
       return { paperId: args.paperId, available: result.available, candidates: candidates.length, probes: result.probes }
     },
   })

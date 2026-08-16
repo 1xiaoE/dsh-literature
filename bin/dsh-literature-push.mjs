@@ -87,6 +87,8 @@ function buildTaskPrompt(topic) {
     '先查历史避免重复推荐，遵循阅读阶段主线递进）。\n' +
     '2) 按 literature_push_now 返回的 instructions 逐步执行：检索→语义排序精选1篇→下载PDF→分块全文精读→' +
     '撰写结构化 Markdown 精读报告并归档到文献库→用 literature_record 提交结果。\n' +
+    '2b) 性能要求：语义排序必须 BATCH（一次至多两次 LLM 调用评估全部 Top 15，禁止逐篇独立调用）；候选排序阶段目标 ≤ 2 分钟；' +
+    'literature_record 时自报 llmCallCount/llmRetryCount/agentRankingMs/reportGenerationMs。\n' +
     '3) Human-in-the-loop（NEED_USER_ACTION）规则：遇到资源访问/认证/权限/下载渠道/研究选择问题且用户更容易解决时，' +
     '不要盲目重试、不要直接判定失败——用 literature_user_action(open) 注册待办（五要素：卡在哪步/缺什么/试过什么/用户做什么/如何继续），' +
     '再用 literature_record 提交 status=user_action_required（errorCode=AUTH_REQUIRED 等），并在汇报中完整展示五要素；' +
