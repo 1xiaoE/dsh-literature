@@ -11,6 +11,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { getPush } from '../lib/history.js'
 import { getStage, stageLabel, stageDef } from '../lib/stages.js'
 import { openActionsOfPush, type UserActionRow } from '../lib/user_actions.js'
@@ -301,7 +302,7 @@ export function defineLiteratureResume(getRt: () => LiteratureRuntime) {
         instructions.push(NEXT[resumeFrom])
       }
 
-      return {
+      return jsonSafe({
         pushId: args.pushId,
         status: push.status,
         stage: stage.current,
@@ -331,7 +332,7 @@ export function defineLiteratureResume(getRt: () => LiteratureRuntime) {
         canResume: resumeFrom !== null,
         resumeFrom: resumeFrom ?? undefined,
         instructions,
-      } satisfies ResumeOutput
+      } satisfies ResumeOutput)
     },
   })
 }

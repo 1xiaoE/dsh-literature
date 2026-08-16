@@ -4,6 +4,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { readChunk } from '../fetch/fulltext.js'
 
 export interface FulltextReadInput {
@@ -60,7 +61,7 @@ export function defineLiteratureFulltextRead(getRt: () => LiteratureRuntime) {
       const t0 = performance.now()
       const chunk = readChunk(rt.db, args.paperId, args.seq)
       if (!chunk) {
-        return { paperId: args.paperId, seq: args.seq, found: false }
+        return jsonSafe({ paperId: args.paperId, seq: args.seq, found: false })
       }
       if (args.pushId !== undefined) {
         rt.perf.add(args.pushId, { fulltextReadMs: performance.now() - t0 })

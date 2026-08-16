@@ -13,6 +13,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { upsertPaper, type PaperRow } from '../db.js'
 import {
   preRank,
@@ -485,7 +486,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         arxivWaitMs: arxivStats.waitMs,
       })
 
-      return {
+      return jsonSafe({
         pushId,
         topicId: topic.id,
         topicDisplayName: topic.displayName,
@@ -555,7 +556,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             rankHint: i + 1,
           })
         }),
-      } satisfies SourcesOutput
+      } satisfies SourcesOutput)
     },
   })
 }

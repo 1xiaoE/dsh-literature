@@ -6,6 +6,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { getPaper } from '../db.js'
 import { preflightPdf, type PreflightProbe } from '../fetch/pdf.js'
 import { rowToRef } from './literature_sources.js'
@@ -85,14 +86,14 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
         const selOther = selected.find((s) => s.paper_id !== args.paperId)
         if (selOther) {
           // invariant: once SELECTED, no further preflight for lower-ranked candidates
-          return {
+          return jsonSafe({
             paperId: args.paperId,
             available: false,
             candidates: 0,
             probes: [],
             alreadySelected: true,
             reason: `push #${args.pushId} 已 SELECTED ${selOther.paper_id}；不得再对更低排名候选执行 preflight`,
-          }
+          })
         }
       }
       // retry cooldown: FULLTEXT_UNAVAILABLE outcomes within the TTL are not re-probed
@@ -128,7 +129,7 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
       if (pushId !== undefined) {
         rt.perf.add(pushId, { pdfPreflightMs: performance.now() - t0 })
       }
-      return { paperId: args.paperId, available: result.available, candidates: candidates.length, probes: result.probes }
+      return jsonSafe({ paperId: args.paperId, available: result.available, candidates: candidates.length, probes: result.probes })
     },
   })
 }

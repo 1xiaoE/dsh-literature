@@ -18,6 +18,7 @@ import { defineLiteratureRecord } from './tools/literature_record.js'
 import { defineLiteraturePushNow } from './tools/literature_push_now.js'
 import { defineLiteratureUserAction } from './tools/literature_user_action.js'
 import { defineLiteratureResume } from './tools/literature_resume.js'
+import { defineLiteratureReportWrite } from './tools/literature_report_write.js'
 
 export const name = 'dsh-literature'
 export const inject = ['tools']
@@ -64,6 +65,7 @@ export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
     defineLiteraturePushNow(getRt, modelRoute),
     defineLiteratureUserAction(getRt),
     defineLiteratureResume(getRt),
+    defineLiteratureReportWrite(getRt),
   ]) {
     ctx.tools.register(tool)
   }

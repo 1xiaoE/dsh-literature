@@ -116,12 +116,39 @@ function buildResumePrompt(pushId) {
   )
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (!existsSync(join(args.harness, 'apps', 'cli', 'src', 'bin.ts'))) {
     console.error(`[dsh-literature] harness not found at ${args.harness} (use --harness or DSH_HARNESS_DIR)`)
     process.exit(2)
   }
+
+  // --resume: try the deterministic 0-LLM finalize path FIRST (push #16-style:
+  // everything done, only a user action was pending and is now resolved).
+  // Only when the state cannot be finalized programmatically do we start a
+  // headless agent for the LLM-driven resume (literature_resume).
+  if (args.resume !== undefined) {
+    const dataDir = resolveDataDir()
+    try {
+      const { openDb } = await import('../lib/db.js')
+      const { tryDeterministicFinalize } = await import('../lib/lib/resume.js')
+      const db = openDb(dataDir)
+      const out = tryDeterministicFinalize(db, args.resume)
+      db.close()
+      if (out.finalized) {
+        console.log(`[dsh-literature] deterministic resume finalize: push #${out.pushId} → completed`)
+        console.log(`  paper:        ${out.paperId}`)
+        console.log(`  report:       ${out.reportPath}`)
+        console.log(`  resume_ms:    ${out.resumeMs}ms`)
+        console.log(`  llm calls:    ${out.resumeLlmCallCount} (0 = no agent reasoning, no re-run of retrieval/ranking/PDF/fulltext/report)`)
+        process.exit(0)
+      }
+      console.error(`[dsh-literature] deterministic finalize 不可用：${out.reason} — 回退到 headless agent resume`)
+    } catch (err) {
+      console.error(`[dsh-literature] deterministic finalize 检查失败（回退 headless）：${String(err)}`)
+    }
+  }
+
   if (args.install || !pluginInstalled()) {
     installPlugin(args.harness)
   }
@@ -139,4 +166,14 @@ function main() {
   process.exit(res.status ?? 1)
 }
 
-main()
+/** XDG data dir for the deterministic resume DB read. */
+function resolveDataDir() {
+  const xdg = process.env.XDG_DATA_HOME
+  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), '.local', 'share')
+  return join(base, 'dsh-literature')
+}
+
+main().catch((err) => {
+  console.error(err)
+  process.exit(1)
+})

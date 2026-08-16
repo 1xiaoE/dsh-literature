@@ -3,7 +3,7 @@
  * push-record appending. The library layout mirrors the repo conventions:
  * <libraryRoot>/<category>/<AuthorYear_keyword>.md
  */
-import { appendFile, mkdir, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, rename as renameFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { expandHome } from './paths.js'
 
@@ -44,6 +44,28 @@ export async function archiveReport(opts: ArchiveReportOptions): Promise<string>
   await mkdir(dir, { recursive: true })
   const path = join(dir, opts.filename)
   await writeFile(path, opts.content, 'utf8')
+  return path
+}
+
+/**
+ * Atomic canonical-report write: mkdir recursive → temp file → atomic rename.
+ * The agent NEVER writes the canonical report through its shell (sandbox may
+ * not reach the data dir); the plugin process owns this path. Returns the
+ * final absolute path, or throws with the underlying error code attached.
+ */
+export async function writeReportAtomic(
+  libraryRoot: string,
+  category: string,
+  filename: string,
+  content: string,
+): Promise<string> {
+  const root = expandHome(libraryRoot)
+  const dir = join(root, category)
+  await mkdir(dir, { recursive: true })
+  const path = join(dir, filename)
+  const tmp = join(dir, `.${filename}.${process.pid}.tmp`)
+  await writeFile(tmp, content, 'utf8')
+  await renameFile(tmp, path)
   return path
 }
 

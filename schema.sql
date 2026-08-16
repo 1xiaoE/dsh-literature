@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS pushes (
   arxiv_429_count INTEGER,
   arxiv_retry_count INTEGER,
   arxiv_rate_limited INTEGER,
-  arxiv_wait_ms INTEGER
+  arxiv_wait_ms INTEGER,
+  resume_ms INTEGER,                             -- deterministic --resume provenance
+  resume_llm_call_count INTEGER                  -- 0 = finalized without LLM
 );
 
 -- Human-in-the-loop (NEED_USER_ACTION): five-part issue record per push.
@@ -183,4 +185,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 12;
+PRAGMA user_version = 13;

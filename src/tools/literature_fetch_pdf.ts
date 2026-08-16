@@ -14,6 +14,7 @@ import { copyFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { getPaper } from '../db.js'
 import { fetchPdf, inRetryCooldown, type FetchAttempt } from '../fetch/pdf.js'
 import { rowToRef } from './literature_sources.js'
@@ -147,31 +148,31 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
           .all(args.pushId) as Array<{ paper_id: string }>
         const selOther = selected.find((s) => s.paper_id !== args.paperId)
         if (selOther) {
-          return {
+          return jsonSafe({
             paperId: args.paperId,
             outcome: 'failed',
             attempts: [],
             reason: `invariant: push #${args.pushId} 已 SELECTED ${selOther.paper_id}；禁止对更低排名候选执行下载`,
-          }
+          })
         }
       }
       const cooldown = inRetryCooldown(rt.db, args.paperId, rt.cfg.fulltext.retryCooldownHours)
       if (cooldown) {
-        return {
+        return jsonSafe({
           paperId: args.paperId,
           outcome: 'failed',
           attempts: [],
           reason: `FULLTEXT_UNAVAILABLE retry cooldown (until ${cooldown})`,
-        }
+        })
       }
       const row = getPaper(rt.db, args.paperId)
       if (!row) {
-        return {
+        return jsonSafe({
           paperId: args.paperId,
           outcome: 'failed',
           attempts: [],
           reason: 'paper not found — 先运行 literature_sources 生成候选',
-        }
+        })
       }
 
       // Human-in-the-loop: user manually downloaded the PDF — validate,
@@ -183,12 +184,12 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
       const paper = rowToRef(row)
       const candidates = await rt.registry.pdfCandidates(paper)
       if (candidates.length === 0 && !(args.allowCarsi && rt.carsi)) {
-        return {
+        return jsonSafe({
           paperId: args.paperId,
           outcome: 'FULLTEXT_UNAVAILABLE',
           attempts: [],
           reason: 'no legal PDF candidate from any adapter',
-        }
+        })
       }
 
       // CARSI provider chain: opt-in + enabled + maxPerPush success cap.
@@ -224,7 +225,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
         out.reason = `CARSI 每推送上限已满（carsi.maxPerPush=${rt.cfg.carsi.maxPerPush}），本次未尝试机构授权`
       }
       if (result.outcome === 'AUTH_REQUIRED') out.userAction = 'carsi_relogin'
-      return out
+      return jsonSafe(out)
     },
   })
 }
@@ -242,28 +243,28 @@ function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: s
   try {
     buf = readFileSync(manualPath)
   } catch {
-    return {
+    return jsonSafe({
       paperId,
       outcome: 'failed',
       attempts: [],
       reason: `manualPdfPath 不存在或不可读：${manualPath}`,
-    }
+    })
   }
   if (buf.length < PDF_MAGIC.length || !buf.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)) {
-    return {
+    return jsonSafe({
       paperId,
       outcome: 'failed',
       attempts: [{ source: 'manual', url: manualPath, status: 'not_pdf' }],
       reason: `手动提供的文件不是 PDF（缺少 %PDF- 文件头）：${manualPath}`,
-    }
+    })
   }
   if (buf.length < minBytes) {
-    return {
+    return jsonSafe({
       paperId,
       outcome: 'failed',
       attempts: [{ source: 'manual', url: manualPath, status: 'too_small' }],
       reason: `手动提供的 PDF 过小：${buf.length}B < ${minBytes}B`,
-    }
+    })
   }
   const sha256 = createHash('sha256').update(buf).digest('hex')
   const pdfPath = join(rt.pdfsDir, `${sha256}.pdf`)

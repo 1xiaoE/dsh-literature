@@ -15,6 +15,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import type { Db } from '../db.js'
 import { getPush } from '../lib/history.js'
 import { agentFinalScore } from '../lib/ranking.js'
@@ -149,8 +150,8 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       errorDetail: { type: 'string', description: '失败详情' },
       advanceStage: { type: 'boolean', description: '强制推进到下一阶段（人工切换）' },
       notes: { type: 'string', description: '备注' },
-      agentRankingMs: { type: 'integer', description: '性能审计：语义排序阶段耗时（ms，agent 自报）' },
-      reportGenerationMs: { type: 'integer', description: '性能审计：报告撰写耗时（ms，agent 自报）' },
+      agentRankingMs: { type: 'number', description: '性能审计：语义排序阶段耗时（ms，agent 自报，允许小数，输出取整）' },
+      reportGenerationMs: { type: 'number', description: '性能审计：报告撰写耗时（ms，agent 自报，允许小数，输出取整）' },
       llmCallCount: { type: 'integer', description: '性能审计：本推送 LLM 调用次数（agent 自报；语义排序应批量，目标 1~2 次）' },
       llmRetryCount: { type: 'integer', description: '性能审计：LLM 重试次数' },
       knowledgeGoals: {
@@ -520,31 +521,35 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       })
 
       const stage = getStage(db, topic)
-      return {
+      // perf timings may be fractional (performance.now() deltas): round all
+      // of them at the output boundary so instrumentation can never break a
+      // push's tool call (lossless-JSON boundary accepts only integers here)
+      const R = (n: number): number => Math.round(n)
+      return jsonSafe({
         pushId: args.pushId,
         status: args.status,
         perfSummary: {
-          retrievalMs: perf.retrievalMs,
-          deterministicRankingMs: perf.deterministicRankingMs,
-          agentRankingMs: perf.agentRankingMs,
-          pdfPreflightMs: perf.pdfPreflightMs,
-          pdfDownloadMs: perf.pdfDownloadMs,
-          parsingMs: perf.parsingMs,
-          fulltextReadMs: perf.fulltextReadMs,
-          reportGenerationMs: perf.reportGenerationMs,
-          totalMs: perf.totalMs,
-          rawCandidates: perf.rawCandidates,
-          deterministicCandidates: perf.deterministicCandidates,
-          agentScoredCandidates: perf.agentScoredCandidates,
-          llmCallCount: perf.llmCallCount,
-          llmRetryCount: perf.llmRetryCount,
-          pdfAttemptCount: perf.pdfAttemptCount,
-          arxivRequests: perf.arxivRequests,
-          arxivDedupHits: perf.arxivDedupHits,
-          arxiv429Count: perf.arxiv429Count,
-          arxivRetryCount: perf.arxivRetryCount,
-          arxivRateLimited: perf.arxivRateLimited,
-          arxivWaitMs: perf.arxivWaitMs,
+          retrievalMs: R(perf.retrievalMs),
+          deterministicRankingMs: R(perf.deterministicRankingMs),
+          agentRankingMs: R(perf.agentRankingMs),
+          pdfPreflightMs: R(perf.pdfPreflightMs),
+          pdfDownloadMs: R(perf.pdfDownloadMs),
+          parsingMs: R(perf.parsingMs),
+          fulltextReadMs: R(perf.fulltextReadMs),
+          reportGenerationMs: R(perf.reportGenerationMs),
+          totalMs: R(perf.totalMs ?? 0),
+          rawCandidates: R(perf.rawCandidates),
+          deterministicCandidates: R(perf.deterministicCandidates),
+          agentScoredCandidates: R(perf.agentScoredCandidates),
+          llmCallCount: R(perf.llmCallCount),
+          llmRetryCount: R(perf.llmRetryCount),
+          pdfAttemptCount: R(perf.pdfAttemptCount),
+          arxivRequests: R(perf.arxivRequests),
+          arxivDedupHits: R(perf.arxivDedupHits),
+          arxiv429Count: R(perf.arxiv429Count),
+          arxivRetryCount: R(perf.arxivRetryCount),
+          arxivRateLimited: R(perf.arxivRateLimited),
+          arxivWaitMs: R(perf.arxivWaitMs),
         },
         stage: stage.current,
         stageLabel: stageLabel(cfg.stageOrder, stage.current),
@@ -560,7 +565,7 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
         readChunks: coverage.readChunks,
         readCoverage: coverage.readCoverage,
         coverageBasis: coverage.coverageBasis,
-      } satisfies RecordOutput
+      } satisfies RecordOutput)
     },
   })
 }

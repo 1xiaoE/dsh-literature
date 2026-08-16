@@ -6,6 +6,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
 import { completedPushCount, seenPaperIds, startPush } from '../lib/history.js'
 import { resolveLibraryRoot } from '../lib/paths.js'
@@ -105,11 +106,11 @@ export function defineLiteraturePushNow(getRt: () => LiteratureRuntime, modelRou
         '9. literature_fetch_pdf（传 pushId）：下载选中论文 PDF（多源回退；CARSI 兜底见 6b）。',
         '10. literature_fulltext_index：解析为分块全文并取索引；再按 seq 用 literature_fulltext_read 逐块精读。',
         `11. 若所有达标候选均无全文：用 literature_record 提交 status=fulltext_unavailable（selection 记录全部尝试与原因），禁止仅凭摘要伪装全文精读。`,
-        `11. 全文精读后，撰写结构化 Markdown 精读报告（研究问题/现有方法局限/核心方法/控制架构/实验设计/重要定量结果/主要结论/局限性/与其他工作的关系/学习价值；说明该论文为何适合当前阶段及其覆盖的 knowledge goals），用 write 归档到 canonical 报告根目录：${reportRoot}/<阶段>/<作者_年份_关键词>.md，并追加 ${reportRoot}/Templates/push_record.md。报告必须记录全文阅读 coverage 四字段：total_chunks（literature_record 输出的总块数）、read_chunks（实际 read 的块数）、read_coverage、coverage_basis（full_read / index_exposed / read_log）。当 read_coverage < 1 时禁止写「全文 N 块全部精读」——如实写「精读 M/N 块（basis=index_exposed 表示未读块的 preview 已由 literature_fulltext_index 暴露，完整正文未读）」。`,
-        `12. literature_record：提交 status=completed、paperId、scores（至少 10 篇，picked 必须 stageRelevance ≥ ${cfg.stageRelevanceThreshold} 且 curriculumValue ≥ ${cfg.curriculumValueThreshold}）、selection 轨迹（agentRank + attemptOrder + outcome + reason，不变式：SELECTED 后无后续条目、至多一个 SELECTED）、knowledgeGoals（picked 论文覆盖的 goal id，优先覆盖 priority goal）、rationale、reportPath；需要人工切换阶段时传 advanceStage=true。completed 时 record 会返回 totalChunks/readChunks/readCoverage/coverageBasis——请把这些值写入报告（见步骤 11）。性能审计：自报 agentRankingMs、reportGenerationMs、llmCallCount（目标 1~2）、llmRetryCount，record 返回 perfSummary（含各阶段耗时与候选计数），也写入报告。`,
+        `11. 全文精读后，撰写结构化 Markdown 精读报告（研究问题/现有方法局限/核心方法/控制架构/实验设计/重要定量结果/主要结论/局限性/与其他工作的关系/学习价值；说明该论文为何适合当前阶段及其覆盖的 knowledge goals），调用 literature_report_write(pushId, stageLabel, filename, content) 写入 canonical：${reportRoot}/<阶段>/<作者_年份_关键词>.md（plugin 进程原子写，不经你的 shell；返回 reportPath 供 literature_record 使用）。不要用通用 write 工具写 canonical 路径（sandbox 可能不可达）；staging 副本仅作异常恢复备份。报告必须记录全文阅读 coverage 四字段：total_chunks（literature_record 输出的总块数）、read_chunks（实际 read 的块数）、read_coverage、coverage_basis（full_read / index_exposed / read_log）。当 read_coverage < 1 时禁止写「全文 N 块全部精读」——如实写「精读 M/N 块（basis=index_exposed 表示未读块的 preview 已由 literature_fulltext_index 暴露，完整正文未读）」。`,
+        `12. literature_record：提交 status=completed、paperId、scores（至少 10 篇，picked 必须 stageRelevance ≥ ${cfg.stageRelevanceThreshold} 且 curriculumValue ≥ ${cfg.curriculumValueThreshold}）、selection 轨迹（agentRank + attemptOrder + outcome + reason，不变式：SELECTED 后无后续条目、至多一个 SELECTED）、knowledgeGoals（picked 论文覆盖的 goal id，优先覆盖 priority goal）、rationale、reportPath（必须为 literature_report_write 返回的 canonical 路径；completed 时 record 会校验该文件存在且非空）；需要人工切换阶段时传 advanceStage=true。若 literature_report_write 返回 REPORT_WRITE_FAILED/SYSTEM_ERROR：literature_record 提交 status=failed、errorCode=REPORT_WRITE_FAILED——系统错误，非 HITL，不注册 user_action。completed 时 record 会返回 totalChunks/readChunks/readCoverage/coverageBasis——请把这些值写入报告（见步骤 11）。性能审计：自报 agentRankingMs、reportGenerationMs、llmCallCount（目标 1~2）、llmRetryCount，record 返回 perfSummary（含各阶段耗时与候选计数），也写入报告。`,
       ]
 
-      return {
+      return jsonSafe({
         pushId,
         topicId: topic.id,
         topicDisplayName: topic.displayName,
@@ -126,7 +127,7 @@ export function defineLiteraturePushNow(getRt: () => LiteratureRuntime, modelRou
         seenCount: seen.size,
         reportRoot,
         instructions,
-      } satisfies PushNowOutput
+      } satisfies PushNowOutput)
     },
   })
 }

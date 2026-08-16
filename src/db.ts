@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 
 export type Db = DatabaseSync
 
@@ -444,6 +444,15 @@ CREATE INDEX IF NOT EXISTS idx_user_actions_state ON user_actions(state);
     add('arxiv_retry_count', 'arxiv_retry_count INTEGER')
     add('arxiv_rate_limited', 'arxiv_rate_limited INTEGER')
     add('arxiv_wait_ms', 'arxiv_wait_ms INTEGER')
+  }
+  if (version < 13) {
+    // Deterministic resume provenance (0-LLM finalize path).
+    const cols = db.prepare('PRAGMA table_info(pushes)').all() as Array<{ name: string }>
+    const add = (name: string, ddl: string): void => {
+      if (!cols.some((c) => c.name === name)) db.exec(`ALTER TABLE pushes ADD COLUMN ${ddl};`)
+    }
+    add('resume_ms', 'resume_ms INTEGER')
+    add('resume_llm_call_count', 'resume_llm_call_count INTEGER')
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

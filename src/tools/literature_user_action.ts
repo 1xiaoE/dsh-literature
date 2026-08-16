@@ -15,6 +15,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { openUserAction, resolveUserAction } from '../lib/user_actions.js'
 
 export interface UserActionInput {
@@ -109,14 +110,14 @@ export function defineLiteratureUserAction(getRt: () => LiteratureRuntime) {
           whatUserShouldDo: args.whatUserShouldDo,
           howToContinue: args.howToContinue,
         })
-        return {
+        return jsonSafe({
           action: 'open',
           pushId: args.pushId,
           actionId: row.id,
           state: 'open',
           pushStatus: 'user_action_required',
           detail: row.kind,
-        }
+        })
       }
       if (!args.actionId) throw new Error('resolve 需要 actionId')
       const row = resolveUserAction(rt.db, args.actionId)
@@ -127,7 +128,7 @@ export function defineLiteratureUserAction(getRt: () => LiteratureRuntime) {
       const push = rt.db
         .prepare('SELECT status FROM pushes WHERE id = ?')
         .get(args.pushId) as { status: string } | undefined
-      return {
+      return jsonSafe({
         action: 'resolve',
         pushId: args.pushId,
         actionId: row.id,
@@ -135,7 +136,7 @@ export function defineLiteratureUserAction(getRt: () => LiteratureRuntime) {
         pushStatus: push?.status ?? 'unknown',
         remainingOpen: open.n,
         detail: args.note,
-      }
+      })
     },
   })
 }

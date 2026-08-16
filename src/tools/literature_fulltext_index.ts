@@ -6,6 +6,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
+import { jsonSafe } from '../lib/json_safe.js'
 import { getIndex, indexFulltext, type FulltextIndex } from '../fetch/fulltext.js'
 
 export interface FulltextIndexInput {
@@ -78,13 +79,13 @@ export function defineLiteratureFulltextIndex(getRt: () => LiteratureRuntime) {
            ON CONFLICT(paper_id) DO UPDATE SET status='unavailable', parser='none',
              char_count=0, chunk_count=0, analyzed_at=datetime('now')`,
         ).run(args.paperId)
-        return {
+        return jsonSafe({
           paperId: args.paperId,
           status: 'unavailable',
           parser: 'none',
           charCount: 0,
           chunks: [],
-        }
+        })
       }
       const t0 = performance.now()
       const res = await indexFulltext(rt.db, args.paperId, fetchRow.pdf_path, {
