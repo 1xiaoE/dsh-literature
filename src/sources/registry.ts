@@ -27,6 +27,8 @@ export interface RegistryOptions {
   mailto?: string
   /** email required by the Unpaywall API (legal-OA locator) */
   unpaywallEmail?: string
+  /** OpenAlex API key (from OPENALEX_API_KEY env by default); never logged */
+  openalexApiKey?: string
 }
 
 export interface RetrievalProvenance {
@@ -37,6 +39,8 @@ export interface RetrievalProvenance {
   retrievalScore: number | null
   pool: 'recent' | 'landmark'
   retrievedAt: string
+  /** auth mode of the producing adapter ('anonymous' | 'api_key') */
+  authMode?: 'anonymous' | 'api_key'
 }
 
 export interface PoolSearchResult {
@@ -183,7 +187,7 @@ export class SourceRegistry {
           console.warn(`[dsh-literature] ${adapter.name} search failed: ${String(err)}`)
           continue
         }
-        allHits.push(...hits.map((h) => ({ ...h, source: adapter.name })))
+        allHits.push(...hits.map((h) => ({ ...h, source: adapter.name, authMode: adapter.authMode })))
         raw += hits.length
       }
     }
@@ -201,6 +205,7 @@ export class SourceRegistry {
         retrievalScore: hit.retrievalScore ?? null,
         pool,
         retrievedAt: new Date().toISOString(),
+        authMode: (hit as SearchHit & { authMode?: 'anonymous' | 'api_key' }).authMode,
       })
     }
 
@@ -282,7 +287,7 @@ export class SourceRegistry {
 export function createRegistry(opts: RegistryOptions = {}): SourceRegistry {
   const registry = new SourceRegistry(opts)
   registry.register(new ArxivAdapter(opts.fetchImpl, opts.timeoutMs))
-  registry.register(new OpenAlexAdapter(opts.fetchImpl, opts.timeoutMs, opts.mailto))
+  registry.register(new OpenAlexAdapter(opts.fetchImpl, opts.timeoutMs, opts.mailto, opts.openalexApiKey))
   registry.register(
     new UnpaywallAdapter(opts.unpaywallEmail ?? 'dsh-literature@example.org', opts.fetchImpl, opts.timeoutMs),
   )

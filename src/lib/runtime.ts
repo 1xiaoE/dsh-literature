@@ -42,6 +42,7 @@ export function createRuntime(cfg: LiteratureConfig, opts: { fetchImpl?: typeof 
     fetchImpl,
     timeoutMs: cfg.http.timeoutMs,
     unpaywallEmail: cfg.http.unpaywallEmail,
+    openalexApiKey: process.env.OPENALEX_API_KEY,
   })
   const carsi = new CarsiPdfProvider({
     dataDir,

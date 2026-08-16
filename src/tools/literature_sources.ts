@@ -355,8 +355,8 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       const insertRetrieval = db.prepare(
         `INSERT INTO retrievals
            (push_id, paper_id, generated_query, query_language, source_adapter,
-            retrieval_score, candidate_pool, retrieved_at)
-         VALUES (?, ?, ?, 'en', ?, ?, ?, datetime('now'))`,
+            retrieval_score, candidate_pool, auth_mode, retrieved_at)
+         VALUES (?, ?, ?, 'en', ?, ?, ?, ?, datetime('now'))`,
       )
 
       // provenance bookkeeping: paperId (pre-merge canonical) → provenance rows
@@ -436,7 +436,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         rows.push({ paper, pool, pre, sr, curriculum: ch.score, landmarkConf: lc, gapGoals: gap.matched, pgMatch: pgMatch.score, inCooldown: cooldownUntil !== null, isSeen, prov })
         if (prov.length > 0) {
           for (const p of prov) {
-            insertRetrieval.run(pushId, id, p.query, p.source, p.retrievalScore, pool)
+            insertRetrieval.run(pushId, id, p.query, p.source, p.retrievalScore, pool, p.authMode ?? null)
           }
         } else {
           insertRetrieval.run(
@@ -446,6 +446,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             'unknown',
             null,
             pool,
+            null,
           )
         }
       }

@@ -6,7 +6,7 @@
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
 
-export const SCHEMA_VERSION = 10
+export const SCHEMA_VERSION = 11
 
 export type Db = DatabaseSync
 
@@ -423,6 +423,14 @@ CREATE INDEX IF NOT EXISTS idx_user_actions_state ON user_actions(state);
     add('llm_call_count', 'llm_call_count INTEGER')
     add('llm_retry_count', 'llm_retry_count INTEGER')
     add('pdf_attempt_count', 'pdf_attempt_count INTEGER')
+  }
+  if (version < 11) {
+    // OpenAlex auth provenance: how the retrieval adapter authenticated.
+    // Only the MODE is stored ('anonymous' | 'api_key') — never the key.
+    const cols = db.prepare('PRAGMA table_info(retrievals)').all() as Array<{ name: string }>
+    if (!cols.some((c) => c.name === 'auth_mode')) {
+      db.exec("ALTER TABLE retrievals ADD COLUMN auth_mode TEXT;")
+    }
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

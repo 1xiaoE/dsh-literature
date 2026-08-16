@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS retrievals (
   source_adapter  TEXT NOT NULL,
   retrieval_score REAL,
   candidate_pool  TEXT NOT NULL CHECK (candidate_pool IN ('recent','landmark')),
+  auth_mode       TEXT,                          -- 'anonymous' | 'api_key' (never the key itself)
   retrieved_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -176,4 +177,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;
