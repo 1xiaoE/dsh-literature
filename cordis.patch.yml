@@ -1,0 +1,9 @@
+# dsh-literature bundle patch — inserted as a profile bundle layer.
+# Install into a profile with:  dsh plugin --profile <name> add link:~/dsh-literature
+# Uninstall with:              dsh plugin --profile <name> rm dsh-literature
+#
+# The row is a bare plugin by package name: the host half (exports ".") runs
+# in the dsh process and registers the literature_* tools on ctx.tools.
+- insert:
+    - id: literature
+      name: 'dsh-literature'
