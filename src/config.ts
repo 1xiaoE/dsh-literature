@@ -557,7 +557,12 @@ export function defaultConfig(): LiteratureConfig {
     publisherBrowser: {
       enabled: true,
       maxPerPush: 1,
-      minIntervalMinutes: 120,
+      // Direct Publisher Access: per-domain rate limit only (NOT a global
+      // 120-min gate). 2 minutes between attempts on the SAME publisher
+      // domain; different domains (IEEE vs Springer) never block each other.
+      // A manual login (browser-login) clears the gate so resume retries
+      // immediately. CARSI keeps its legacy 120-min gate (disabled by default).
+      minIntervalMinutes: 2,
       headless: true,
       timeoutMs: 90000,
       profileDir: '',

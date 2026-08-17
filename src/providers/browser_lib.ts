@@ -223,6 +223,8 @@ export function storePdf(buf: Buffer, pdfsDir: string): { path: string; sha256: 
 
 export interface SessionLedger {
   lastAttemptAt?: string
+  /** per-publisher-domain last attempt timestamps (ISO), e.g. ieeexplore.ieee.org */
+  lastAttemptByDomain?: Record<string, string>
   lastOutcome?: string
   lastAuthAt?: string
   attemptsCount: number

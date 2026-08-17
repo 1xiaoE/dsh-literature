@@ -46,6 +46,44 @@ import {
 
 export const PUBLISHER_LEDGER_FILE = 'publisher_browser/session.json'
 
+/**
+ * Extract the publisher rate-limit domain for a paper. Prefers the paper's
+ * own URL host when it points at a real publisher (not doi.org), else falls
+ * back to the DOI prefix registry (10.1109 → ieeexplore.ieee.org etc.).
+ * Returns null when no domain can be determined (no per-domain gate).
+ */
+const DOI_PREFIX_DOMAINS: Record<string, string> = {
+  '10.1109': 'ieeexplore.ieee.org',
+  '10.1080': 'tandfonline.com',
+  '10.1007': 'springer.com',
+  '10.1016': 'sciencedirect.com',
+  '10.1038': 'nature.com',
+  '10.1126': 'science.org',
+  '10.1145': 'dl.acm.org',
+  '10.1146': 'annualreviews.org',
+  '10.2514': 'arc.aiaa.org',
+  '10.1177': 'journals.sagepub.com',
+  '10.1201': 'taylorfrancis.com',
+}
+
+export function publisherDomainOf(paper: PaperRef): string | null {
+  if (paper.url) {
+    try {
+      const u = new URL(paper.url)
+      if (u.hostname && u.hostname !== 'doi.org' && u.hostname !== 'dx.doi.org') {
+        return u.hostname.replace(/^www\./, '')
+      }
+    } catch {
+      /* fall through to DOI prefix */
+    }
+  }
+  if (paper.doi) {
+    const prefix = paper.doi.split('/')[0]?.toLowerCase()
+    if (prefix && DOI_PREFIX_DOMAINS[prefix]) return DOI_PREFIX_DOMAINS[prefix]!
+  }
+  return null
+}
+
 export interface PublisherBrowserOptions {
   dataDir: string
   enabled: boolean
@@ -204,26 +242,50 @@ export class PublisherBrowserProvider implements PdfProvider {
     return join(this.opts.dataDir, PUBLISHER_LEDGER_FILE)
   }
 
-  shouldAttempt(now: Date = new Date()): { ok: boolean; reason?: string } {
+  /**
+   * PdfProvider-interface compatible: the pipeline pre-check only verifies
+   * the provider is enabled. The real rate limit is per-publisher-domain and
+   * is enforced inside fetch() via shouldAttemptFor — so a previous IEEE
+   * attempt never blocks a Springer paper, and a post-login --resume (which
+   * clears the ledger) retries immediately.
+   */
+  shouldAttempt(_now: Date = new Date()): { ok: boolean; reason?: string } {
+    if (!this.opts.enabled) return { ok: false, reason: 'publisher_browser 未启用' }
+    return { ok: true }
+  }
+
+  /** Per-domain rate limit check (publisher host → last attempt timestamp). */
+  shouldAttemptFor(domain: string, now: Date = new Date()): { ok: boolean; reason?: string } {
     if (!this.opts.enabled) return { ok: false, reason: 'publisher_browser 未启用' }
     const ledger = readLedger(this.ledgerFile())
-    if (!ledger.lastAttemptAt) return { ok: true }
-    const last = new Date(ledger.lastAttemptAt).getTime()
-    if (Number.isNaN(last)) return { ok: true }
     const intervalMs = this.opts.minIntervalMinutes * 60 * 1000
+    const iso = (ledger.lastAttemptByDomain ?? {})[domain]
+    if (!iso) return { ok: true }
+    const last = new Date(iso).getTime()
+    if (Number.isNaN(last)) return { ok: true }
     if (now.getTime() - last < intervalMs) {
       const until = new Date(last + intervalMs).toISOString()
       return {
         ok: false,
-        reason: `publisher_browser 低频门：距上次尝试不足 ${this.opts.minIntervalMinutes} 分钟（最早可试 ${until}）`,
+        reason: `publisher_browser 低频门（${domain}）：距上次尝试不足 ${this.opts.minIntervalMinutes} 分钟（最早可试 ${until}）`,
       }
     }
     return { ok: true }
   }
 
+  /** PdfProvider-interface compatible: records a global attempt (no domain). */
   markAttempt(now: Date = new Date(), outcome?: string): void {
+    this.markAttemptFor(undefined, now, outcome)
+  }
+
+  /** Record an attempt against a publisher domain (per-domain rate limit). */
+  markAttemptFor(domain: string | undefined, now: Date = new Date(), outcome?: string): void {
     const ledger = readLedger(this.ledgerFile())
-    ledger.lastAttemptAt = now.toISOString()
+    const iso = now.toISOString()
+    if (domain) {
+      ledger.lastAttemptByDomain = { ...(ledger.lastAttemptByDomain ?? {}), [domain]: iso }
+    }
+    ledger.lastAttemptAt = iso
     ledger.attemptsCount = (ledger.attemptsCount ?? 0) + 1
     if (outcome) ledger.lastOutcome = outcome
     writeLedger(this.ledgerFile(), ledger)
@@ -233,8 +295,11 @@ export class PublisherBrowserProvider implements PdfProvider {
     const ledger = readLedger(this.ledgerFile())
     ledger.lastAuthAt = now.toISOString()
     ledger.lastOutcome = 'authenticated'
-    // a manual re-login is a human action: reset the interval gate
+    // A manual re-login is a human action: clear EVERY rate-limit timestamp
+    // (global + per-domain) so the user can immediately retry the same paper
+    // via --resume without waiting out the automatic rate limit.
     delete ledger.lastAttemptAt
+    delete ledger.lastAttemptByDomain
     writeLedger(this.ledgerFile(), ledger)
   }
 
@@ -249,15 +314,30 @@ export class PublisherBrowserProvider implements PdfProvider {
   /** Resolve DOI / publisher URL → article page → PDF (or a terminal reason). */
   async fetch(paper: PaperRef, opts: ProviderFetchOptions): Promise<ProviderResult> {
     const started = new Date()
+    const domain = publisherDomainOf(paper) ?? undefined
     if (!(await probeBrowserAvailable(this.launcher))) {
       const reason = 'playwright/chromium 不可用（publisher_browser 未安装或已降级）'
-      this.markAttempt(started, 'PDF_NOT_FOUND')
+      this.markAttemptFor(domain, started, 'PDF_NOT_FOUND')
       return { outcome: 'PDF_NOT_FOUND', reason }
     }
     const urls = resolveCandidateUrls(paper)
     if (urls.length === 0) {
-      this.markAttempt(started, 'PDF_NOT_FOUND')
+      this.markAttemptFor(domain, started, 'PDF_NOT_FOUND')
       return { outcome: 'PDF_NOT_FOUND', reason: '无 DOI / publisher URL 可解析' }
+    }
+    // Per-domain rate limit: a recent attempt on the SAME publisher blocks,
+    // but different publishers never block each other (IEEE ≠ Springer).
+    // The user-facing login CLI calls markAuthenticated() which clears ALL
+    // timestamps, so a post-login --resume retries immediately.
+    if (domain) {
+      const gate = this.shouldAttemptFor(domain, started)
+      if (!gate.ok) {
+        this.markAttemptFor(domain, started, 'skipped')
+        return {
+          outcome: 'PDF_NOT_FOUND',
+          reason: `${gate.reason}（domain=${domain}）`,
+        }
+      }
     }
 
     let browser: BrowserLike | null = null
@@ -288,7 +368,7 @@ export class PublisherBrowserProvider implements PdfProvider {
 
           const got = await tryPagePdf(page, captured, downloads, opts)
           if (got) {
-            this.markAttempt(started, got.outcome)
+            this.markAttemptFor(domain, started, got.outcome)
             return got
           }
 
@@ -315,7 +395,7 @@ export class PublisherBrowserProvider implements PdfProvider {
                 '出版社登录墙：需要合法登录/机构订阅。请运行 bin/dsh-literature-browser-login（headed 浏览器完成登录）后 --resume 继续；不得自动填写账号/密码/验证码。',
             }
             failures.push(r)
-            this.markAttempt(started, 'AUTH_REQUIRED')
+            this.markAttemptFor(domain, started, 'AUTH_REQUIRED')
             return r
           }
           if (wall === 'denied') {
@@ -343,7 +423,7 @@ export class PublisherBrowserProvider implements PdfProvider {
       }
 
       const winner = strongestFailure(failures)
-      this.markAttempt(started, winner.outcome)
+      this.markAttemptFor(domain, started, winner.outcome)
       return winner
     } finally {
       if (browser) await browser.close().catch(() => undefined)

@@ -187,19 +187,33 @@ describe('publisher_browser provider', () => {
     expect(row.sha256).toHaveLength(64)
   })
 
-  it('6. strict low-frequency gate blocks a second immediate attempt', async () => {
+  it('6. per-domain rate limit blocks the SAME publisher, not others', async () => {
     const dir = tempDir('gate')
     const provider = makeProvider(dir, stubLauncher({ pdfUrl: 'https://doi.org/10.1000%2Fxyz' }), {
-      minIntervalMinutes: 120,
+      minIntervalMinutes: 2,
     })
+    // global PdfProvider-interface check never rate-limits (enabled only)
     expect(provider.shouldAttempt().ok).toBe(true)
-    provider.markAttempt(new Date(), 'PDF_OK')
-    const gate = provider.shouldAttempt(new Date(Date.now() + 1000))
+    // domain-level: first attempt on ieeexplore → second blocked
+    provider.markAttemptFor('ieeexplore.ieee.org', new Date(), 'PDF_OK')
+    const gate = provider.shouldAttemptFor('ieeexplore.ieee.org', new Date(Date.now() + 1000))
     expect(gate.ok).toBe(false)
     expect(gate.reason).toContain('低频门')
-    // markAuthenticated resets the interval gate (manual login is a human action)
+    // a DIFFERENT publisher domain is not blocked (IEEE never blocks Springer)
+    expect(provider.shouldAttemptFor('link.springer.com', new Date(Date.now() + 1000)).ok).toBe(true)
+    // markAuthenticated clears ALL rate-limit timestamps → immediate retry
     provider.markAuthenticated()
-    expect(provider.shouldAttempt().ok).toBe(true)
+    expect(provider.shouldAttemptFor('ieeexplore.ieee.org', new Date(Date.now() + 1000)).ok).toBe(true)
+  })
+
+  it('6b. publisher domain resolution maps DOI prefixes to hosts', async () => {
+    const { publisherDomainOf } = await import('../src/providers/publisher_browser.js')
+    expect(publisherDomainOf({ id: 'doi:10.1109/x', title: 'T', authors: [], doi: '10.1109/abc', metadataSource: 'crossref' })).toBe('ieeexplore.ieee.org')
+    expect(publisherDomainOf({ id: 'doi:10.1080/x', title: 'T', authors: [], doi: '10.1080/abc', metadataSource: 'crossref' })).toBe('tandfonline.com')
+    expect(publisherDomainOf({ id: 'doi:10.1007/x', title: 'T', authors: [], doi: '10.1007/abc', metadataSource: 'crossref' })).toBe('springer.com')
+    expect(
+      publisherDomainOf({ id: 'doi:10.1000/x', title: 'T', authors: [], doi: '10.1000/abc', url: 'https://publisher.example/article/1', metadataSource: 'crossref' }),
+    ).toBe('publisher.example')
   })
 })
 
