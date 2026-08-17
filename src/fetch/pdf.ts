@@ -227,6 +227,11 @@ function strongestProviderFailure(attempts: FetchAttempt[]): FetchOutcome | unde
   if (attempts.some((a) => a.status === 'auth_required')) return 'AUTH_REQUIRED'
   if (attempts.some((a) => a.status === 'access_denied')) return 'ACCESS_DENIED'
   if (attempts.some((a) => a.status === 'not_found')) return 'PDF_NOT_FOUND'
+  // All provider entries were 'skipped' (low-frequency gate / disabled): no
+  // provider actually attempted the paper, so this is NOT a paper-level
+  // FULLTEXT_UNAVAILABLE (which would arm the 72h retry cooldown). Report a
+  // benign PDF_NOT_FOUND instead — the caller may retry once the gate opens.
+  if (attempts.some((a) => a.status === 'skipped')) return 'PDF_NOT_FOUND'
   return undefined
 }
 

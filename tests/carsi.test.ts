@@ -325,7 +325,7 @@ describe('fetchPdf provider chain (order: public → CARSI → terminal)', () =>
     rmSync(dir2, { recursive: true, force: true })
   })
 
-  it('provider blocked by frequency gate → skipped attempt + FULLTEXT_UNAVAILABLE', async () => {
+  it('provider blocked by frequency gate → skipped attempt, PDF_NOT_FOUND (no FULLTEXT_UNAVAILABLE cooldown)', async () => {
     const dir = tempDir('gate')
     const db = openDb(dir)
     seedPaper(db, 'doi:10.1000/xyz')
@@ -344,7 +344,9 @@ describe('fetchPdf provider chain (order: public → CARSI → terminal)', () =>
         paper: PAPER,
       },
     )
-    expect(res.outcome).toBe('FULLTEXT_UNAVAILABLE')
+    // A gate-skipped provider means no provider actually attempted the paper:
+    // benign PDF_NOT_FOUND, never FULLTEXT_UNAVAILABLE (which arms the 72h cooldown).
+    expect(res.outcome).toBe('PDF_NOT_FOUND')
     expect(res.attempts.some((a) => a.status === 'skipped' && a.source === 'carsi')).toBe(true)
     db.close()
     rmSync(dir, { recursive: true, force: true })

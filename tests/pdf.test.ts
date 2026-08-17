@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { openDb, upsertPaper, type Db } from '../src/db.js'
 import { fetchPdf, inRetryCooldown } from '../src/fetch/pdf.js'
 import type { PdfCandidate } from '../src/sources/types.js'
+import type { PdfProvider } from '../src/providers/types.js'
 
 function fakeFetch(routes: Array<{ status: number; body: Buffer | string }>) {
   let i = 0
@@ -124,6 +125,34 @@ describe('fetchPdf multi-source fallback', () => {
     )
     expect(result.outcome).toBe('FULLTEXT_UNAVAILABLE')
     expect(result.attempts[0]!.status).toBe('too_small')
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('providers skipped by the low-frequency gate → PDF_NOT_FOUND (no FULLTEXT_UNAVAILABLE cooldown)', async () => {
+    const { db, dir } = tempDb()
+    seedPaper(db, 'arxiv:2401.004')
+    const gateSkipped: PdfProvider = {
+      name: 'publisher_browser',
+      accessType: 'institutional',
+      isOpenAccess: false,
+      async fetch() {
+        return { outcome: 'PDF_NOT_FOUND', reason: 'should not be called' }
+      },
+      shouldAttempt() {
+        return { ok: false, reason: '低频门：距上次尝试不足 120 分钟' }
+      },
+      markAttempt() {},
+      markAuthenticated() {},
+    }
+    const result = await fetchPdf(db, 'arxiv:2401.004', [], join(dir, 'pdfs'), {
+      providers: [gateSkipped],
+      paper: { id: 'arxiv:2401.004', title: 'T', authors: [], metadataSource: 'crossref' },
+    })
+    // A skipped provider is NOT a paper-level failure: no 72h cooldown arm.
+    expect(result.outcome).toBe('PDF_NOT_FOUND')
+    expect(result.attempts.some((a) => a.status === 'skipped')).toBe(true)
+    expect(inRetryCooldown(db, 'arxiv:2401.004', 72)).toBeNull()
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })
