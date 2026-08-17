@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS pushes (
   arxiv_rate_limited INTEGER,
   arxiv_wait_ms INTEGER,
   resume_ms INTEGER,                             -- deterministic --resume provenance
-  resume_llm_call_count INTEGER                  -- 0 = finalized without LLM
+  resume_llm_call_count INTEGER,                 -- 0 = finalized without LLM
+  policy_json TEXT                                -- normalized config snapshot for deterministic resume
 );
 
 -- Human-in-the-loop (NEED_USER_ACTION): five-part issue record per push.
@@ -102,6 +103,9 @@ CREATE TABLE IF NOT EXISTS candidates (
   priority_goal_match   REAL NOT NULL DEFAULT 0,   -- priority-goal match STRENGTH 0..1 (deterministic)
   selection_outcome     TEXT,                      -- SELECTED | FULLTEXT_UNAVAILABLE | BELOW_QUALITY_GATE | PDF_FAILED
   selection_rejection_reason TEXT,
+  public_preflight_status TEXT CHECK (public_preflight_status IS NULL OR public_preflight_status IN ('AVAILABLE','UNAVAILABLE')),
+  acquisition_outcome TEXT CHECK (acquisition_outcome IS NULL OR acquisition_outcome IN ('SELECTED','AUTH_REQUIRED','RATE_LIMITED','ACCESS_DENIED','PDF_NOT_FOUND','FULLTEXT_UNAVAILABLE','PDF_FAILED')),
+  acquisition_reason TEXT,
   landmark_confidence   REAL,
   methodological_centrality REAL,
   candidate_pool       TEXT NOT NULL DEFAULT 'recent'
@@ -120,7 +124,7 @@ CREATE TABLE IF NOT EXISTS fetch_log (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   paper_id       TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   attempts       TEXT NOT NULL,                       -- JSON: [{source,url,status,http,detail}]
-  outcome        TEXT NOT NULL CHECK (outcome IN ('ok','PDF_OK','AUTH_REQUIRED','ACCESS_DENIED','PDF_NOT_FOUND','FULLTEXT_UNAVAILABLE','failed')),
+  outcome        TEXT NOT NULL CHECK (outcome IN ('ok','PDF_OK','AUTH_REQUIRED','RATE_LIMITED','ACCESS_DENIED','PDF_NOT_FOUND','FULLTEXT_UNAVAILABLE','failed')),
   pdf_path       TEXT,
   pdf_source     TEXT,                                -- provenance: winning URL + license
   sha256         TEXT,
@@ -185,4 +189,4 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 13;
+PRAGMA user_version = 15;

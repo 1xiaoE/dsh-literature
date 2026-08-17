@@ -12,7 +12,7 @@
  *    read_chunks / read_coverage / coverage_basis (index_exposed vs
  *    full_read) persisted on pushes.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -268,6 +268,8 @@ describe('literature_record reading-coverage provenance', () => {
         )
         .run(pushId, PAPER, seq)
     }
+    const reportPath = join(rt.cfg.dataDir, `coverage-${pushId}.md`)
+    writeFileSync(reportPath, '# coverage report\n')
     const recordTool = defineLiteratureRecord(() => rt, () => null)
     return run(recordTool, {
       pushId,
@@ -287,33 +289,17 @@ describe('literature_record reading-coverage provenance', () => {
       ],
       selection: [{ paperId: PAPER, agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'ok' }],
       knowledgeGoals: ['impedance_compliance'],
+      reportPath,
     })
   }
 
-  it('9/10 read → readCoverage 0.9 with coverage_basis=index_exposed (chunk 0 preview exposed by index)', async () => {
+  it('9/10 read → completion is rejected by the default full-read gate', async () => {
     const { rt, dir } = setup()
     ensureStage(rt.db, TOPIC, 3)
     const pushId = startPush(rt.db, TOPIC, 1).pushId
-    const rec = (await recordCompleted(rt, pushId, [1, 2, 3, 4, 5, 6, 7, 8, 9])) as {
-      totalChunks: number
-      readChunks: number
-      readCoverage: number
-      coverageBasis: string
-    }
-    expect(rec.totalChunks).toBe(10)
-    expect(rec.readChunks).toBe(9)
-    expect(rec.readCoverage).toBe(0.9)
-    expect(rec.coverageBasis).toBe('index_exposed')
-    const push = rt.db.prepare('SELECT total_chunks, read_chunks, read_coverage, coverage_basis FROM pushes WHERE id = ?').get(pushId) as {
-      total_chunks: number
-      read_chunks: number
-      read_coverage: number
-      coverage_basis: string
-    }
-    expect(push.total_chunks).toBe(10)
-    expect(push.read_chunks).toBe(9)
-    expect(push.read_coverage).toBeCloseTo(0.9)
-    expect(push.coverage_basis).toBe('index_exposed')
+    await expect(recordCompleted(rt, pushId, [1, 2, 3, 4, 5, 6, 7, 8, 9])).rejects.toThrow(/全文阅读覆盖不足/)
+    const push = rt.db.prepare('SELECT status FROM pushes WHERE id = ?').get(pushId) as { status: string }
+    expect(push.status).toBe('running')
     rt.db.close()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -352,11 +338,13 @@ describe('literature_record reading-coverage provenance', () => {
       bibtex: null,
       metadata_source: 'arxiv',
     })
-    // fulltext_unavailable record: no index, no reads
+    // fulltext_unavailable record: ranking still exists, but no index/reads.
+    rt.db.prepare('INSERT INTO candidates (push_id, paper_id, rank_hint, picked, is_seen) VALUES (?, ?, 1, 0, 0)').run(pushId, 'arxiv:9999.00001')
     const recordTool = defineLiteratureRecord(() => rt, () => null)
     const rec = (await run(recordTool, {
       pushId,
       status: 'fulltext_unavailable',
+      scores: [{ paperId: 'arxiv:9999.00001', relevance: 0.8, learningValue: 0.8, representativeness: 0.7, novelty: 0.4, stageRelevance: 0.8, curriculumValue: 0.8, rationale: 'unavailable but quality-passed' }],
       selection: [{ paperId: 'arxiv:9999.00001', agentRank: 1, attemptOrder: 1, outcome: 'FULLTEXT_UNAVAILABLE' }],
     })) as { totalChunks: number; readChunks: number; readCoverage: number; coverageBasis: string }
     expect(rec.totalChunks).toBe(0)
@@ -373,7 +361,7 @@ describe('v9 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v9-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(14)
+    expect(version.user_version).toBe(15)
     const pushId = startPush(db, 't', 1).pushId
     db.prepare(
       `INSERT INTO papers (id, title, authors, metadata_source)

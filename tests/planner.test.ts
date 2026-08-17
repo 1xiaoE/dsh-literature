@@ -186,9 +186,10 @@ describe('query merge + pools', () => {
     const stage = cfg.stageOrder[0]!
     const recent = await registry.searchPool(cfg, planQueries(topic, stage, 'recent'), stage, 'recent')
     expect(recent.papers.length).toBe(1)
-    expect(recent.rawCount).toBe(24) // 12 queries x 2 adapters
-    // provenance keeps both source trails (per query x source)
-    expect(recent.provenance.length).toBe(24)
+    const expectedRequests = cfg.retrieval.arxivMaxQueriesPerPool + cfg.retrieval.maxQueriesPerPool
+    expect(recent.rawCount).toBe(expectedRequests) // source-specific query budgets
+    // provenance keeps both source trails for every issued query
+    expect(recent.provenance.length).toBe(expectedRequests)
     expect(new Set(recent.provenance.map((p) => p.source))).toEqual(new Set(['arxiv', 'openalex']))
   })
 

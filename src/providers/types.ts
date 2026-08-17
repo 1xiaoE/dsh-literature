@@ -13,7 +13,7 @@
 import type { PaperRef } from '../sources/types.js'
 
 /** Terminal outcomes of one provider attempt (per requirement 6). */
-export type ProviderOutcome = 'PDF_OK' | 'AUTH_REQUIRED' | 'ACCESS_DENIED' | 'PDF_NOT_FOUND'
+export type ProviderOutcome = 'PDF_OK' | 'AUTH_REQUIRED' | 'RATE_LIMITED' | 'ACCESS_DENIED' | 'PDF_NOT_FOUND'
 
 export interface ProviderFetchOptions {
   /** directory to store downloaded PDFs as pdfs/<sha256>.pdf */

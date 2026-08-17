@@ -16,10 +16,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { jsonSafe } from '../lib/json_safe.js'
-import type { Db } from '../db.js'
 import { getPush } from '../lib/history.js'
-import { agentFinalScore } from '../lib/ranking.js'
-import { recordPaperInStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
+import { getStage, stageLabel, stageDef } from '../lib/stages.js'
+import { persistSemanticScores, rankedCandidateStates } from '../lib/selection.js'
+import { finalizeCompletedPush, readingCoverage } from '../lib/finalize.js'
 
 export type PushStatus =
   | 'completed'
@@ -92,42 +92,6 @@ export interface RecordOutput {
   coverageBasis: 'full_read' | 'index_exposed' | 'read_log'
   /** performance audit summary (plugin-timed + agent-reported phases) */
   perfSummary: Record<string, number>
-}
-
-/**
- * Reading-coverage provenance:
- * - totalChunks: chunks indexed by literature_fulltext_index;
- * - readChunks:   distinct seqs actually read via literature_fulltext_read;
- * - readCoverage: readChunks / totalChunks;
- * - coverageBasis:
- *     'full_read'     — every chunk was read via literature_fulltext_read;
- *     'index_exposed' — some chunks were NOT read, but literature_fulltext_index
- *                       exposed ALL chunk previews to the model. Reports must
- *                       state read_chunks/total_chunks with this basis and MUST
- *                       NOT claim "全部精读";
- *     'read_log'      — no index exists (nothing exposed).
- */
-export function readingCoverage(
-  db: Db,
-  pushId: number,
-  paperId: string,
-): { totalChunks: number; readChunks: number; readCoverage: number; coverageBasis: 'full_read' | 'index_exposed' | 'read_log' } {
-  const ft = db
-    .prepare("SELECT chunk_count FROM fulltexts WHERE paper_id = ? AND status = 'ok'")
-    .get(paperId) as { chunk_count: number } | undefined
-  const total = ft?.chunk_count ?? 0
-  const readRow = db
-    .prepare('SELECT COUNT(DISTINCT seq) AS n FROM fulltext_reads WHERE push_id = ? AND paper_id = ?')
-    .get(pushId, paperId) as { n: number }
-  const read = readRow?.n ?? 0
-  if (total <= 0) return { totalChunks: 0, readChunks: 0, readCoverage: 0, coverageBasis: 'read_log' }
-  const basis = read >= total ? ('full_read' as const) : ('index_exposed' as const)
-  return {
-    totalChunks: total,
-    readChunks: read,
-    readCoverage: Math.round((read / total) * 100) / 100,
-    coverageBasis: basis,
-  }
 }
 
 export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRoute: () => string | null) {
@@ -272,236 +236,122 @@ export function defineLiteratureRecord(getRt: () => LiteratureRuntime, modelRout
       const stageDefNow = stageDef(cfg.stageOrder, push.stage)
       const curriculumWeight = stageDefNow?.curriculumWeight
 
-      // --- semantic ranking trace (Stage B) ---
+      // --- semantic ranking trace (Stage B; backward-compatible) ---
+      // New workflow persists this earlier through literature_rank_candidates.
       if (args.scores && args.scores.length > 0) {
-        const update = db.prepare(
-          `UPDATE candidates SET
-             relevance_score = ?, learning_value_score = ?, representative_score = ?,
-             novelty_score = ?, stage_relevance_score = ?, curriculum_value = ?,
-             methodological_centrality = ?, final_score = ?, rationale = ?
-           WHERE push_id = ? AND paper_id = ?`,
-        )
-        for (const s of args.scores) {
-          const final = agentFinalScore(
-            {
-              relevance: s.relevance,
-              learningValue: s.learningValue,
-              representativeness: s.representativeness,
-              novelty: s.novelty,
-              stageRelevance: s.stageRelevance,
-              curriculumValue: s.curriculumValue,
-            },
-            cfg,
-            curriculumWeight,
-          )
-          update.run(
-            s.relevance,
-            s.learningValue,
-            s.representativeness,
-            s.novelty,
-            s.stageRelevance,
-            s.curriculumValue,
-            s.methodologicalCentrality ?? null,
-            final,
-            s.rationale,
-            args.pushId,
-            s.paperId,
-          )
-        }
+        persistSemanticScores(db, args.pushId, args.scores, cfg, curriculumWeight)
       }
 
-      // --- selection trail (invariant-enforced) ---
-      if (
-        (args.status === 'fulltext_unavailable' || args.status === 'auth_required') &&
-        (!args.selection || args.selection.length === 0)
-      ) {
-        throw new Error(
-          `${args.status} 必须提交 selection 轨迹（全部尝试的候选、agentRank、attemptOrder、outcome 与原因）`,
-        )
-      }
+      // --- selection trail / status invariants ---
       if (args.errorCode === 'AUTH_REQUIRED' && args.status !== 'auth_required' && args.status !== 'user_action_required') {
         throw new Error(
-          'errorCode=AUTH_REQUIRED 时 status 必须为 auth_required 或 user_action_required（CARSI 会话失效≠fulltext_unavailable，需提示用户重新登录）',
+          'errorCode=AUTH_REQUIRED 时 status 必须为 auth_required 或 user_action_required（认证墙≠fulltext_unavailable）',
         )
       }
-      // NEED_USER_ACTION invariant: status user_action_required requires at
-      // least one open user_actions row registered via literature_user_action
       if (args.status === 'user_action_required') {
         const open = db
           .prepare("SELECT COUNT(*) AS n FROM user_actions WHERE push_id = ? AND state = 'open'")
           .get(args.pushId) as { n: number }
         if (open.n === 0) {
           throw new Error(
-            'status=user_action_required 必须先调用 literature_user_action(open) 注册至少一项待办（五要素：卡点/缺什么/试过什么/用户做什么/如何继续）',
+            'status=user_action_required 必须先调用 literature_user_action(open) 注册至少一项待办（五要素）',
           )
         }
       }
+
+      const ranked = rankedCandidateStates(db, args.pushId)
+      const eligible = ranked
+        .filter((c) => c.stageRelevance >= cfg.stageRelevanceThreshold && c.curriculumValue >= cfg.curriculumValueThreshold)
+        .slice(0, cfg.maxSelectionAttempts)
+      const persistedTrail = eligible.filter((c) => c.attemptOrder !== null)
+
       if (args.selection && args.selection.length > 0) {
         const sorted = [...args.selection].sort((a, b) => a.attemptOrder - b.attemptOrder)
-        const orders = sorted.map((s) => s.attemptOrder)
-        for (let i = 0; i < orders.length; i += 1) {
-          if (orders[i] !== i + 1) {
-            throw new Error(`attemptOrder 必须从 1 连续递增：${JSON.stringify(orders)}`)
+        for (let i = 0; i < sorted.length; i += 1) {
+          const s = sorted[i]!
+          if (s.attemptOrder !== i + 1) {
+            throw new Error(`attemptOrder 必须从 1 连续递增：${JSON.stringify(sorted.map((x) => x.attemptOrder))}`)
           }
         }
-        const selectedCount = sorted.filter((s) => s.outcome === 'SELECTED').length
-        if (selectedCount > 1) {
-          throw new Error('invariant: 每个 push 至多一个 SELECTED')
-        }
-        const selectedIdx = sorted.findIndex((s) => s.outcome === 'SELECTED')
+        // Validate generic trail shape first, then the stronger Quality First
+        // rank mapping. This keeps errors precise while still making rank order
+        // a hard invariant rather than an agent convention.
+        const selectedCount = sorted.filter((x) => x.outcome === 'SELECTED').length
+        if (selectedCount > 1) throw new Error('invariant: 每个 push 至多一个 SELECTED')
+        const selectedIdx = sorted.findIndex((x) => x.outcome === 'SELECTED')
         if (selectedIdx !== -1 && selectedIdx !== sorted.length - 1) {
-          throw new Error(
-            'invariant: SELECTED 出现后不得再对更低排名候选执行 preflight/download',
-          )
+          throw new Error('invariant: SELECTED 出现后不得继续 acquisition')
+        }
+        for (let i = 0; i < sorted.length; i += 1) {
+          const s = sorted[i]!
+          const expected = eligible[i]
+          if (!expected || expected.paperId !== s.paperId || expected.agentRank !== s.agentRank) {
+            throw new Error(
+              `Quality First invariant: attemptOrder=${s.attemptOrder} 应对应 ${expected ? `agentRank #${expected.agentRank} ${expected.paperId}` : '无候选'}，收到 agentRank #${s.agentRank} ${s.paperId}`,
+            )
+          }
         }
         const updateSel = db.prepare(
-          `UPDATE candidates SET agent_rank = ?, preflight_attempt_order = ?,
-             selection_outcome = ?, selection_rejection_reason = ?
+          `UPDATE candidates SET preflight_attempt_order = ?, selection_outcome = ?, selection_rejection_reason = ?
            WHERE push_id = ? AND paper_id = ?`,
         )
-        for (const s of sorted) {
-          updateSel.run(s.agentRank, s.attemptOrder, s.outcome, s.reason ?? null, args.pushId, s.paperId)
+        for (const item of sorted) {
+          updateSel.run(item.attemptOrder, item.outcome, item.reason ?? null, args.pushId, item.paperId)
         }
       }
 
-      // --- agent_rank for scored candidates WITHOUT an explicit selection rank ---
-      if (args.scores && args.scores.length > 0) {
-        db.exec(
-          `UPDATE candidates SET agent_rank = (
-             SELECT 1 + COUNT(*) FROM candidates c2
-             WHERE c2.push_id = candidates.push_id AND c2.final_score > candidates.final_score
-           ) WHERE push_id = ${args.pushId} AND final_score IS NOT NULL AND agent_rank IS NULL`,
-        )
+      const trailCount = args.selection?.length ?? persistedTrail.length
+      if ((args.status === 'fulltext_unavailable' || args.status === 'auth_required') && trailCount === 0) {
+        throw new Error(`${args.status} 必须存在 acquisition/selection 轨迹`)
       }
 
-      // --- quality gates: picked paper must pass stage AND curriculum ---
-      let stageMatched = false
-      let readsCount = 0
-      if (args.status === 'completed' && args.paperId) {
-        // full-text reading coverage: the picked paper must have been read
-        // chunk-by-chunk through literature_fulltext_read within this push
-        readsCount = (
-          db
-            .prepare(
-              'SELECT COUNT(*) AS n FROM fulltext_reads WHERE push_id = ? AND paper_id = ?',
-            )
-            .get(args.pushId, args.paperId) as { n: number }
-        ).n
-        const ft = db
-          .prepare("SELECT chunk_count FROM fulltexts WHERE paper_id = ? AND status = 'ok'")
-          .get(args.paperId) as { chunk_count: number } | undefined
-        if (ft && ft.chunk_count > 0 && readsCount === 0) {
-          throw new Error(
-            `picked 论文 ${args.paperId} 尚未通过 literature_fulltext_read 阅读任何 chunk（全文 ${ft.chunk_count} 块）；完成前请先逐块精读`,
-          )
-        }
-        if (args.selection) {
-          const pickedSel = args.selection.find((s) => s.paperId === args.paperId)
-          if (!pickedSel || pickedSel.outcome !== 'SELECTED') {
-            throw new Error(
-              `picked 论文 ${args.paperId} 必须在其 selection 条目中标记为 SELECTED（当前：${pickedSel?.outcome ?? '缺失'}）`,
-            )
-          }
-        }
-        const row = db
-          .prepare(
-            'SELECT stage_relevance_score, curriculum_value FROM candidates WHERE push_id = ? AND paper_id = ?',
-          )
-          .get(args.pushId, args.paperId) as
-          | { stage_relevance_score: number | null; curriculum_value: number | null }
-          | undefined
-        if (!row || row.stage_relevance_score === null || row.curriculum_value === null) {
-          throw new Error(
-            `评分缺失：论文 ${args.paperId} 必须同时提供 stageRelevance 与 curriculumValue 评分。`,
-          )
-        }
-        if (row.stage_relevance_score < cfg.stageRelevanceThreshold) {
-          throw new Error(
-            `stage_relevance_score=${row.stage_relevance_score} 低于阈值 ${cfg.stageRelevanceThreshold}：该论文不得选为 Top 1。`,
-          )
-        }
-        if (row.curriculum_value < cfg.curriculumValueThreshold) {
-          throw new Error(
-            `curriculum_value=${row.curriculum_value} 低于阈值 ${cfg.curriculumValueThreshold}：该论文对当前阶段的课程价值不足，不得选为 Top 1（不得因 PDF 可获取而选择低课程价值论文）。`,
-          )
-        }
-        stageMatched = true
-      }
-
-      // --- status + provenance ---
       let coverage: ReturnType<typeof readingCoverage> = {
         totalChunks: 0,
         readChunks: 0,
         readCoverage: 0,
         coverageBasis: 'read_log',
       }
-      if (args.status === 'completed' && args.paperId) {
-        coverage = readingCoverage(db, args.pushId, args.paperId)
-      }
-      db.prepare(
-        `UPDATE pushes SET status = ?, finished_at = datetime('now'), paper_id = ?,
-           report_path = ?, error_code = ?, error_detail = ?, notes = ?, model_route = ?,
-           total_chunks = ?, read_chunks = ?, read_coverage = ?, coverage_basis = ?
-         WHERE id = ?`,
-      ).run(
-        args.status,
-        args.paperId ?? null,
-        args.reportPath ?? null,
-        args.errorCode ?? null,
-        args.errorDetail ?? null,
-        args.notes ?? null,
-        modelRoute(),
-        coverage.totalChunks || null,
-        coverage.readChunks || null,
-        coverage.readCoverage || null,
-        coverage.coverageBasis,
-        args.pushId,
-      )
-
-      // --- knowledge coverage + stage progression ---
+      let stageMatched = false
       let advanced = false
       let pendingRequired: string[] = []
       let duplicate = false
-      if (args.status === 'completed' && args.paperId) {
-        const seenBefore = db
-          .prepare(
-            `SELECT 1 FROM candidates c JOIN pushes p ON p.id = c.push_id
-             WHERE p.topic = ? AND c.paper_id = ? AND c.picked = 1 AND p.status = 'completed'`,
-          )
-          .get(topic, args.paperId)
-        duplicate = Boolean(seenBefore)
-        db.prepare('UPDATE candidates SET picked = 1 WHERE push_id = ? AND paper_id = ?').run(
+
+      if (args.status === 'completed') {
+        if (!args.paperId) throw new Error('completed 时 paperId 必填')
+        const reportRow = db.prepare('SELECT report_path FROM pushes WHERE id = ?').get(args.pushId) as { report_path: string | null } | undefined
+        const reportPath = args.reportPath ?? reportRow?.report_path ?? ''
+        const done = finalizeCompletedPush(db, cfg, {
+          pushId: args.pushId,
+          paperId: args.paperId,
+          reportPath,
+          knowledgeGoals: args.knowledgeGoals,
+          advanceStage: args.advanceStage,
+          notes: args.notes,
+          modelRoute: modelRoute(),
+        })
+        coverage = done.coverage
+        stageMatched = done.stageMatched
+        advanced = done.stageAdvanced
+        pendingRequired = done.pendingRequiredGoals
+        duplicate = done.duplicate
+      } else {
+        db.prepare(
+          `UPDATE pushes SET status = ?, finished_at = datetime('now'), paper_id = COALESCE(?, paper_id),
+             report_path = COALESCE(?, report_path), error_code = ?, error_detail = ?,
+             notes = COALESCE(?, notes), model_route = COALESCE(?, model_route)
+           WHERE id = ?`,
+        ).run(
+          args.status,
+          args.paperId ?? null,
+          args.reportPath ?? null,
+          args.errorCode ?? null,
+          args.errorDetail ?? null,
+          args.notes ?? null,
+          modelRoute(),
           args.pushId,
-          args.paperId,
         )
-
-        const goals = args.knowledgeGoals ?? []
-        if (goals.length > 0 && !duplicate) {
-          const ins = db.prepare(
-            'INSERT OR IGNORE INTO knowledge_coverage (push_id, paper_id, goal) VALUES (?, ?, ?)',
-          )
-          for (const g of goals) ins.run(args.pushId, args.paperId, g)
-        }
-
-        if (!duplicate) {
-          const res = recordPaperInStage(db, topic, {
-            targetPapers: cfg.targetPapersPerStage,
-            minCoverage: cfg.minKnowledgeCoverage,
-            coveredGoals: goals,
-            forceAdvance: args.advanceStage ?? false,
-            requiredGoals: stageDefNow?.requiredGoals ?? [],
-          })
-          advanced = res.advanced
-          pendingRequired = res.pendingRequired
-        } else if (args.advanceStage) {
-          const res = recordPaperInStage(db, topic, {
-            targetPapers: cfg.targetPapersPerStage,
-            minCoverage: cfg.minKnowledgeCoverage,
-            forceAdvance: true,
-          })
-          advanced = res.advanced
-        }
       }
+      const readsCount = coverage.readChunks
 
       // --- performance audit flush (plugin phases + agent-reported phases) ---
       const pushRow2 = db.prepare('SELECT started_at FROM pushes WHERE id = ?').get(args.pushId) as

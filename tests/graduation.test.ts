@@ -10,7 +10,7 @@
  * Test D — a genuine impedance/compliance paper (full-text-confirmed goal)
  *          covers the required goal and lets Fundamentals graduate.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -149,6 +149,10 @@ describe('Test C/D: agent full-text judgment decides required-goal coverage', ()
          VALUES (?, ?, 1, 0, 0.8, 0.7, 'SELECTED', 1, 1, 'recent', 0)`,
       )
       .run(pushId, paperId)
+    rt.db.prepare("INSERT INTO fulltexts (paper_id, status, parser, char_count, chunk_count) VALUES (?, 'ok', 'test', 100, 1)").run(paperId)
+    rt.db.prepare('INSERT INTO fulltext_reads (push_id, paper_id, seq) VALUES (?, ?, 0)').run(pushId, paperId)
+    const reportPath = join(rt.cfg.dataDir, `graduation-${pushId}.md`)
+    writeFileSync(reportPath, '# full text graduation report\n')
     const recordTool = defineLiteratureRecord(() => rt, () => null)
     return run(recordTool, {
       pushId,
@@ -168,6 +172,7 @@ describe('Test C/D: agent full-text judgment decides required-goal coverage', ()
       ],
       selection: [{ paperId, agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'ok' }],
       knowledgeGoals: goals,
+      reportPath,
     })
   }
 

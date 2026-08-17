@@ -61,7 +61,13 @@ export class PerfTracker {
   /** Persist the accumulated perf into the pushes row and clear the entry. */
   flush(db: Db, pushId: number, overrides: PushPerfPatch = {}): PushPerf {
     const perf = this.get(pushId)
-    const merged: PushPerf = { ...perf, ...overrides }
+    // Preserve metrics accumulated by earlier tools when literature_record omits
+    // an override. Object-spreading `undefined` values would otherwise erase
+    // e.g. agentRankingMs / llmCallCount recorded by literature_rank_candidates.
+    const merged: PushPerf = { ...perf }
+    for (const [k, v] of Object.entries(overrides)) {
+      if (typeof v === 'number' && Number.isFinite(v)) merged[k as keyof PushPerf] = v
+    }
     db.prepare(
       `UPDATE pushes SET
          retrieval_ms = ?, deterministic_ranking_ms = ?, agent_ranking_ms = ?,

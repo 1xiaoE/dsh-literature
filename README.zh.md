@@ -59,6 +59,10 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 | `publisherBrowser.minIntervalMinutes` | `2` | 按出版社域名限流（IEEE ≠ Springer）；登录后清除，resume 立即重试 |
 | `carsi.enabled` | `false` | LEGACY CARSI 门户导航 — 仅供历史/测试 |
 | `ranking.fulltextAvailability` | `0.03` | OA 可得性仅是获取成本提示，绝非质量信号 |
+| `fulltext.minReadCoverage` | `1.0` | completed 前最低全文阅读覆盖率；默认要求所有 indexed chunks 均读过 |
+| `retrieval.maxQueriesPerPool` | `8` | 普通检索源每个 pool 的均衡 query 上限 |
+| `retrieval.arxivMaxQueriesPerPool` | `4` | arXiv 每个 pool 的更严格 query 上限（保留 3.1 s 串行礼貌间隔） |
+| `retrieval.sourceConcurrency` | `4` | 非 arXiv 检索源的有界并发数 |
 
 ### OpenAlex API key（可选但推荐）
 
@@ -109,7 +113,7 @@ Rank #1 → 质量门通过？→ public/OA 链（arXiv / OpenAlex OA / Unpaywal
 
 ## 全文处理
 
-**Quality First, Access Second**：论文先按学术质量排序（topic / stage / curriculum / venue / learning value / knowledge gap），全文获取在排序后逐篇进行，绝不覆盖质量。每篇候选顺序：arXiv/OA → Unpaywall → 出版社链接 → publisher_browser（DOI 直连 → 出版社文章页 → PDF）→ `FULLTEXT_UNAVAILABLE`。登录墙将推送停驻为 `AUTH_REQUIRED`（HITL：`bin/dsh-literature-browser-login`），绝不伪装失败。每次下载均验证（HTTP / Content-Type / %PDF- 魔数 / 非 HTML 登录页 / 大小 / sha256）；文本分块后 token 安全阅读；每次推送记录 `total_chunks / read_chunks / read_coverage / coverage_basis`。
+**Quality First, Access Second**：论文先批量语义评分并由 `literature_rank_candidates` 固化唯一 `agent_rank`；之后由代码状态机逐篇完成整条 acquisition chain，agent 无法跳 Rank。每篇候选顺序：公开/OA preflight → 公开下载链 → publisher_browser（DOI 直连 → 出版社文章页 → PDF）。`AUTH_REQUIRED` 与 `RATE_LIMITED` 都会停留在当前 Rank；只有 `ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE / PDF_FAILED` 等明确论文级终态才允许进入下一 Rank。登录墙将推送停驻为 `AUTH_REQUIRED`（HITL：`bin/dsh-literature-browser-login`），绝不伪装失败。每次下载均验证（HTTP / Content-Type / %PDF- 魔数 / 非 HTML 登录页 / 大小 / sha256）；文本分块后 token 安全阅读；每次推送记录 `total_chunks / read_chunks / read_coverage / coverage_basis`。
 
 ## Human-in-the-loop
 
@@ -152,7 +156,7 @@ pnpm test        # vitest
 
 ## 测试
 
-PDF 回退链、per-domain 限流、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF-/大小/sha256 校验、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + v13→v14 manual provenance）、lossless-JSON 输出边界。
+Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（RATE_LIMITED）、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF-/大小/sha256 校验、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + DB v15 acquisition state / policy snapshot）、lossless-JSON 输出边界。
 
 ## 当前状态
 

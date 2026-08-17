@@ -315,14 +315,15 @@ export class PublisherBrowserProvider implements PdfProvider {
   async fetch(paper: PaperRef, opts: ProviderFetchOptions): Promise<ProviderResult> {
     const started = new Date()
     const domain = publisherDomainOf(paper) ?? undefined
+    // Environment faults (missing runtime / unresolvable identity) are NOT real
+    // publisher attempts: never move the per-domain timestamp, otherwise a
+    // broken playwright would make the domain wait out minIntervalMinutes.
     if (!(await probeBrowserAvailable(this.launcher))) {
       const reason = 'playwright/chromium 不可用（publisher_browser 未安装或已降级）'
-      this.markAttemptFor(domain, started, 'PDF_NOT_FOUND')
       return { outcome: 'PDF_NOT_FOUND', reason }
     }
     const urls = resolveCandidateUrls(paper)
     if (urls.length === 0) {
-      this.markAttemptFor(domain, started, 'PDF_NOT_FOUND')
       return { outcome: 'PDF_NOT_FOUND', reason: '无 DOI / publisher URL 可解析' }
     }
     // Per-domain rate limit: a recent attempt on the SAME publisher blocks,
@@ -332,9 +333,10 @@ export class PublisherBrowserProvider implements PdfProvider {
     if (domain) {
       const gate = this.shouldAttemptFor(domain, started)
       if (!gate.ok) {
-        this.markAttemptFor(domain, started, 'skipped')
+        // A blocked retry is NOT an attempt: do not move the timestamp
+        // forward, otherwise repeated retries create a sliding lockout.
         return {
-          outcome: 'PDF_NOT_FOUND',
+          outcome: 'RATE_LIMITED',
           reason: `${gate.reason}（domain=${domain}）`,
         }
       }
@@ -445,6 +447,6 @@ export class PublisherBrowserProvider implements PdfProvider {
 /** Pick the most informative failure across candidates. */
 function strongestFailure(results: ProviderResult[]): ProviderResult {
   if (results.length === 0) return { outcome: 'PDF_NOT_FOUND', reason: '无可用候选' }
-  const rank: Record<string, number> = { AUTH_REQUIRED: 3, ACCESS_DENIED: 2, PDF_NOT_FOUND: 1 }
+  const rank: Record<string, number> = { AUTH_REQUIRED: 4, RATE_LIMITED: 3, ACCESS_DENIED: 2, PDF_NOT_FOUND: 1 }
   return [...results].sort((a, b) => (rank[b.outcome] ?? 0) - (rank[a.outcome] ?? 0))[0]!
 }

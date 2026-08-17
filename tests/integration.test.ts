@@ -8,7 +8,7 @@
  *   fulltext_unavailable, no analyze, no fake report, no stage progress.
  * - stage gate: below-threshold stage_relevance papers cannot be picked.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -150,12 +150,14 @@ describe('FULLTEXT_UNAVAILABLE_TERMINAL', () => {
     // terminal record: no fake report, no stage progress
     ensureStage(rt.db, '足式机器人控制', 3)
     const pushId = startPush(rt.db, '足式机器人控制', 1).pushId
+    rt.db.prepare('INSERT INTO candidates (push_id, paper_id, rank_hint, picked, is_seen) VALUES (?, ?, 1, 0, 0)').run(pushId, 'arxiv:2401.001')
     const recordTool = defineLiteratureRecord(() => rt, () => null)
     const rec = await run(recordTool, {
       pushId,
       status: 'fulltext_unavailable',
       errorCode: 'NO_LEGAL_FULLTEXT',
       errorDetail: 'all sources failed: 403',
+      scores: [{ paperId: 'arxiv:2401.001', relevance: 0.8, learningValue: 0.8, representativeness: 0.7, novelty: 0.4, stageRelevance: 0.8, curriculumValue: 0.8, rationale: 'quality-passed but inaccessible' }],
       selection: [
         { paperId: 'arxiv:2401.001', agentRank: 1, attemptOrder: 1, outcome: 'FULLTEXT_UNAVAILABLE', reason: 'all sources 403' },
       ],
@@ -239,12 +241,16 @@ describe('stage relevance gate', () => {
         'INSERT INTO candidates (push_id, paper_id, rank_hint, picked, is_seen) VALUES (?, ?, 1, 0, 0)',
       )
       .run(pushId, 'arxiv:2401.001')
+    rt.db.prepare("INSERT INTO fulltexts (paper_id, status, parser, char_count, chunk_count) VALUES ('arxiv:2401.001', 'ok', 'test', 100, 1)").run()
+    rt.db.prepare("INSERT INTO fulltext_reads (push_id, paper_id, seq) VALUES (?, 'arxiv:2401.001', 0)").run(pushId)
+    const reportPath = join(dir, 'stage-match.md')
+    writeFileSync(reportPath, '# stage matched report\n')
     const recordTool = defineLiteratureRecord(() => rt, () => null)
     const rec = await run(recordTool, {
       pushId,
       status: 'completed',
       paperId: 'arxiv:2401.001',
-      reportPath: '/tmp/reports/x.md',
+      reportPath,
       selection: [
         { paperId: 'arxiv:2401.001', agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'arXiv OA' },
       ],
@@ -355,9 +361,9 @@ describe('selection invariant (V0.3)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('writes agent_rank and preflight_attempt_order separately', async () => {
+  it('hard-rejects a selection trail that skips the current highest quality rank', async () => {
     const { rt, dir, pushId, paperId, recordTool } = setup()
-    await run(recordTool, {
+    await expect(run(recordTool, {
       pushId,
       status: 'completed',
       paperId,
@@ -365,16 +371,15 @@ describe('selection invariant (V0.3)', () => {
         { paperId, agentRank: 3, attemptOrder: 1, outcome: 'SELECTED', reason: 'OA' },
       ],
       scores: okScores(paperId),
-    })
-    const row = rt.db
-      .prepare('SELECT agent_rank, preflight_attempt_order, selection_outcome FROM candidates WHERE push_id = ? AND paper_id = ?')
-      .get(pushId, paperId) as { agent_rank: number | null; preflight_attempt_order: number | null; selection_outcome: string }
-    expect(row.agent_rank).toBe(3) // agent semantic rank, independent of attempt order
-    expect(row.preflight_attempt_order).toBe(1)
-    expect(row.selection_outcome).toBe('SELECTED')
+    })).rejects.toThrow(/Quality First invariant/)
     rmSync(dir, { recursive: true, force: true })
   })
 })
+
+const okScoresForUnavailable = (paperId: string) => [{
+  paperId, relevance: 0.8, learningValue: 0.7, representativeness: 0.7, novelty: 0.4,
+  stageRelevance: 0.9, curriculumValue: 0.85, rationale: 'quality-passed but unavailable',
+}]
 
 describe('fulltext_unavailable trail enforcement (V0.3)', () => {
   it('requires a selection trail for fulltext_unavailable status', async () => {
@@ -396,15 +401,16 @@ describe('fulltext_unavailable trail enforcement (V0.3)', () => {
     const rec = await run(recordTool, {
       pushId,
       status: 'fulltext_unavailable',
+      scores: okScoresForUnavailable(paperId),
       selection: [
-        { paperId, agentRank: 2, attemptOrder: 1, outcome: 'FULLTEXT_UNAVAILABLE', reason: 'all sources 403' },
+        { paperId, agentRank: 1, attemptOrder: 1, outcome: 'FULLTEXT_UNAVAILABLE', reason: 'all sources 403' },
       ],
     })
     expect(rec.status).toBe('fulltext_unavailable')
     const row = rt.db
       .prepare('SELECT agent_rank, preflight_attempt_order, selection_outcome FROM candidates WHERE push_id = ? AND paper_id = ?')
       .get(pushId, paperId) as { agent_rank: number | null; preflight_attempt_order: number | null; selection_outcome: string }
-    expect(row.agent_rank).toBe(2)
+    expect(row.agent_rank).toBe(1)
     expect(row.preflight_attempt_order).toBe(1)
     expect(row.selection_outcome).toBe('FULLTEXT_UNAVAILABLE')
     rmSync(dir, { recursive: true, force: true })
@@ -452,17 +458,21 @@ describe('fulltext reads coverage (audit fix)', () => {
       knowledgeGoals: ['template_dynamics'],
     }
     // no reads yet → rejected
-    await expect(run(recordTool, args)).rejects.toThrow(/尚未通过 literature_fulltext_read/)
-    // record two reads, then completion succeeds and reports readsCount
+    await expect(run(recordTool, args)).rejects.toThrow(/全文阅读覆盖不足/)
+    // partial reads still cannot complete under the default 100% gate.
     const readTool = defineLiteratureFulltextRead(() => rt)
     await run(readTool, { paperId, seq: 0, pushId })
     await run(readTool, { paperId, seq: 1, pushId })
-    const rec = await run(recordTool, args)
-    expect(rec.readsCount).toBe(2)
+    await expect(run(recordTool, args)).rejects.toThrow(/全文阅读覆盖不足/)
+    for (const seq of [2, 3, 4]) await run(readTool, { paperId, seq, pushId })
+    const reportPath = join(dir, 'full-read.md')
+    writeFileSync(reportPath, '# full read report\n')
+    const rec = await run(recordTool, { ...args, reportPath })
+    expect(rec.readsCount).toBe(5)
     const reads = rt.db
       .prepare('SELECT seq FROM fulltext_reads WHERE push_id = ? AND paper_id = ? ORDER BY seq')
       .all(pushId, paperId) as Array<{ seq: number }>
-    expect(reads.map((r) => r.seq)).toEqual([0, 1])
+    expect(reads.map((r) => r.seq)).toEqual([0, 1, 2, 3, 4])
     rmSync(dir, { recursive: true, force: true })
   })
 })

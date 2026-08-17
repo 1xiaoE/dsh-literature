@@ -11,6 +11,7 @@ import { getPaper } from '../db.js'
 import { preflightPdf, type PreflightProbe } from '../fetch/pdf.js'
 import { rowToRef } from './literature_sources.js'
 import { inRetryCooldown } from '../fetch/pdf.js'
+import { allocateAttemptOrder, ensureAcquisitionTurn, markPublicPreflight } from '../lib/selection.js'
 
 export interface PreflightInput {
   paperId: string
@@ -31,7 +32,7 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
   return defineTool({
     name: 'literature_pdf_preflight',
     description:
-      '合法全文可得性 preflight：对论文的全部 PDF 候选做有界探测（不落盘），返回 available。选择协议：按语义排名依次 preflight，取排名最高且 质量门槛达标 + available=true 的论文。',
+      '合法全文 public/OA preflight：必须先调用 literature_rank_candidates 固化语义排名。提供 pushId 时，代码硬性只允许当前最高排名且质量门达标的候选；preflight 失败后仍不得跳 Rank，必须继续同一论文的 literature_fetch_pdf(allowInstitutional=true)。',
     parameters: {
       paperId: { type: 'string', required: true, description: '候选论文 id' },
       pushId: { type: 'integer', description: '推送号；提供时执行 SELECTED 不变式检查' },
@@ -78,21 +79,25 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
     async execute(args: PreflightInput): Promise<PreflightOutput> {
       const rt = getRt()
       if (args.pushId !== undefined) {
-        const selected = rt.db
-          .prepare(
-            "SELECT paper_id FROM candidates WHERE push_id = ? AND selection_outcome = 'SELECTED'",
-          )
-          .all(args.pushId) as Array<{ paper_id: string }>
-        const selOther = selected.find((s) => s.paper_id !== args.paperId)
-        if (selOther) {
-          // invariant: once SELECTED, no further preflight for lower-ranked candidates
+        try {
+          const turn = ensureAcquisitionTurn(rt.db, args.pushId, args.paperId, rt.cfg)
+          if (turn.publicPreflightStatus) {
+            return jsonSafe({
+              paperId: args.paperId,
+              available: turn.publicPreflightStatus === 'AVAILABLE',
+              candidates: 0,
+              probes: [],
+              reason: `已复用持久化 public preflight=${turn.publicPreflightStatus}；下一步必须继续同一 Rank 的 literature_fetch_pdf`,
+            })
+          }
+        } catch (err) {
           return jsonSafe({
             paperId: args.paperId,
             available: false,
             candidates: 0,
             probes: [],
-            alreadySelected: true,
-            reason: `push #${args.pushId} 已 SELECTED ${selOther.paper_id}；不得再对更低排名候选执行 preflight`,
+            alreadySelected: String(err).includes('已 SELECTED'),
+            reason: String(err instanceof Error ? err.message : err),
           })
         }
       }
@@ -128,6 +133,9 @@ export function defineLiteraturePdfPreflight(getRt: () => LiteratureRuntime) {
       )?.push_id
       if (pushId !== undefined) {
         rt.perf.add(pushId, { pdfPreflightMs: performance.now() - t0 })
+        markPublicPreflight(rt.db, pushId, args.paperId, result.available)
+        // First real preflight of this rank consumes the acquisition attempt slot.
+        allocateAttemptOrder(rt.db, pushId, args.paperId)
       }
       return jsonSafe({ paperId: args.paperId, available: result.available, candidates: candidates.length, probes: result.probes })
     },

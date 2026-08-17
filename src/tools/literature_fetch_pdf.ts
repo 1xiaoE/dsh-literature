@@ -20,6 +20,7 @@ import { jsonSafe } from '../lib/json_safe.js'
 import { getPaper } from '../db.js'
 import { fetchPdf, inRetryCooldown, type FetchAttempt } from '../fetch/pdf.js'
 import { rowToRef } from './literature_sources.js'
+import { allocateAttemptOrder, ensureAcquisitionTurn, markAcquisitionOutcome } from '../lib/selection.js'
 
 export interface FetchPdfInput {
   paperId: string
@@ -49,7 +50,7 @@ export interface FetchPdfInput {
 
 export interface FetchPdfOutput {
   paperId: string
-  outcome: 'ok' | 'PDF_OK' | 'AUTH_REQUIRED' | 'ACCESS_DENIED' | 'PDF_NOT_FOUND' | 'FULLTEXT_UNAVAILABLE' | 'failed'
+  outcome: 'ok' | 'PDF_OK' | 'AUTH_REQUIRED' | 'RATE_LIMITED' | 'ACCESS_DENIED' | 'PDF_NOT_FOUND' | 'FULLTEXT_UNAVAILABLE' | 'failed'
   pdfPath?: string
   sha256?: string
   pdfSource?: string
@@ -61,13 +62,17 @@ export interface FetchPdfOutput {
   userAction?: 'publisher_login' | 'carsi_relogin'
 }
 
-/** How many institutional PDF_OK successes this push already has (maxPerPush cap). */
+/** How many institutional PDF_OK successes this push already has (maxPerPush cap).
+ *  Only counts rows whose candidate is acquisition-SELECTED: legacy rows from
+ *  pre-状态机 pushes or pushless fetches never count, so maxPerPush=1 cannot
+ *  dead-lock a fresh push on an old institutional row. */
 function institutionalSuccessCount(rt: LiteratureRuntime, pushId: number): number {
   const row = rt.db
     .prepare(
       `SELECT COUNT(*) AS n FROM fetch_log f
        JOIN candidates c ON c.paper_id = f.paper_id
-       WHERE c.push_id = ? AND f.outcome = 'PDF_OK' AND f.access_type = 'institutional'`,
+       WHERE c.push_id = ? AND f.outcome = 'PDF_OK' AND f.access_type = 'institutional'
+         AND c.acquisition_outcome = 'SELECTED'`,
     )
     .get(pushId) as { n: number }
   return row?.n ?? 0
@@ -77,7 +82,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
   return defineTool({
     name: 'literature_fetch_pdf',
     description:
-      '多源回退下载论文 PDF：公开/OA 链（arXiv → OpenAlex OA → Unpaywall → Crossref 出版社链接）；全部失败且传入 allowInstitutional=true（或兼容别名 allowCarsi=true；仅限已过质量门、公开全文全失败的论文）时，按排名对达标候选依次尝试机构访问（默认 publisher_browser 通用出版社浏览器；CARSI 为 legacy/默认禁用）。终态：ok / PDF_OK / AUTH_REQUIRED（登录墙，需人工用 bin/dsh-literature-browser-login 完成登录）/ ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE。',
+      '多源回退下载论文 PDF。提供 pushId 时执行 Quality First 硬约束：必须先 literature_rank_candidates，再对当前最高排名达标候选完成 public/OA→publisher 的完整 acquisition chain；Rank1 未得到 ACCESS_DENIED/PDF_NOT_FOUND 等明确终态前禁止跳 Rank。终态：ok / PDF_OK / AUTH_REQUIRED / RATE_LIMITED / ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE。',
     parameters: {
       paperId: { type: 'string', required: true, description: '候选论文 id（来自 literature_sources）' },
       pushId: { type: 'integer', description: '推送号；提供时执行 SELECTED 不变式检查' },
@@ -106,7 +111,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
           outcome: {
             type: 'string',
             required: true,
-            enum: ['ok', 'PDF_OK', 'AUTH_REQUIRED', 'ACCESS_DENIED', 'PDF_NOT_FOUND', 'FULLTEXT_UNAVAILABLE', 'failed'],
+            enum: ['ok', 'PDF_OK', 'AUTH_REQUIRED', 'RATE_LIMITED', 'ACCESS_DENIED', 'PDF_NOT_FOUND', 'FULLTEXT_UNAVAILABLE', 'failed'],
           },
           pdfPath: { type: 'string' },
           sha256: { type: 'string' },
@@ -127,7 +132,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
                 status: {
                   type: 'string',
                   required: true,
-                  enum: ['ok', 'http_error', 'not_pdf', 'too_small', 'network_error', 'skipped', 'auth_required', 'access_denied', 'not_found'],
+                  enum: ['ok', 'http_error', 'not_pdf', 'too_small', 'network_error', 'skipped', 'auth_required', 'rate_limited', 'access_denied', 'not_found'],
                 },
                 http: { type: 'integer' },
                 detail: { type: 'string' },
@@ -146,6 +151,8 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
                 ? `PDF 下载成功（机构访问，非 OA，仅私人文献库）：${value.pdfSource} (sha256=${value.sha256?.slice(0, 12)}…)`
                 : value.outcome === 'AUTH_REQUIRED'
                   ? `AUTH_REQUIRED：出版社登录墙/机构会话缺失或已失效（${value.attempts.filter((a) => a.status === 'auth_required').map((a) => a.detail).join('; ') || '详见 attempts'}）。请运行 bin/dsh-literature-browser-login 完成合法登录后 --resume 继续；本次不进入 cooldown。`
+                  : value.outcome === 'RATE_LIMITED'
+                  ? `RATE_LIMITED：${value.reason ?? value.attempts.filter((a) => a.status === 'rate_limited').map((a) => a.detail).join('; ')}。保持当前 Rank，不得跳到下一候选；到最早重试时间后 --resume。`
                   : value.outcome === 'FULLTEXT_UNAVAILABLE'
                     ? `FULLTEXT_UNAVAILABLE：${value.attempts.length} 个源均失败。${value.attempts.map((a) => `${a.source}:${a.status}${a.detail ? `(${a.detail})` : ''}`).join(', ')}`
                     : `失败（${value.outcome}）：${value.reason ?? '未知原因'}。${value.attempts.map((a) => `${a.source}:${a.status}`).join(', ')}`,
@@ -154,19 +161,41 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
     },
     async execute(args: FetchPdfInput): Promise<FetchPdfOutput> {
       const rt = getRt()
+      const wantInstitutional = args.allowInstitutional || args.allowCarsi === true
       if (args.pushId !== undefined) {
-        const selected = rt.db
-          .prepare(
-            "SELECT paper_id FROM candidates WHERE push_id = ? AND selection_outcome = 'SELECTED'",
-          )
-          .all(args.pushId) as Array<{ paper_id: string }>
-        const selOther = selected.find((s) => s.paper_id !== args.paperId)
-        if (selOther) {
+        try {
+          const turn = ensureAcquisitionTurn(rt.db, args.pushId, args.paperId, rt.cfg)
+          if (!args.manualPdfPath && !turn.publicPreflightStatus) {
+            return jsonSafe({
+              paperId: args.paperId,
+              outcome: 'failed',
+              attempts: [],
+              reason: `Quality First invariant: agentRank #${turn.agentRank} 尚未 public preflight；先调用 literature_pdf_preflight(pushId=${args.pushId}, paperId=${args.paperId})`,
+            })
+          }
+          // Quality First: when the public/OA chain is UNAVAILABLE on the
+          // current rank, the full public→institutional fallback must run
+          // (allowInstitutional=true) instead of jumping to a lower rank.
+          // When public IS available, opt-in stays opt-in (backward compatible).
+          if (
+            !args.manualPdfPath &&
+            turn.publicPreflightStatus === 'UNAVAILABLE' &&
+            rt.providers.length > 0 &&
+            !wantInstitutional
+          ) {
+            return jsonSafe({
+              paperId: args.paperId,
+              outcome: 'failed',
+              attempts: [],
+              reason: 'Quality First invariant: 当前 Rank public/OA 不可得，必须一次完成 public→institutional 回退链；请传 allowInstitutional=true，不能直接跳下一 Rank',
+            })
+          }
+        } catch (err) {
           return jsonSafe({
             paperId: args.paperId,
             outcome: 'failed',
             attempts: [],
-            reason: `invariant: push #${args.pushId} 已 SELECTED ${selOther.paper_id}；禁止对更低排名候选执行下载`,
+            reason: String(err instanceof Error ? err.message : err),
           })
         }
       }
@@ -192,32 +221,53 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
       // Human-in-the-loop: user manually downloaded the PDF — validate,
       // hash and register it directly (skips the automatic chain).
       if (args.manualPdfPath) {
-        return registerManualPdf(rt, args.paperId, args.manualPdfPath)
+        const manual = registerManualPdf(rt, args.paperId, args.manualPdfPath)
+        if (args.pushId !== undefined && manual.outcome === 'PDF_OK') {
+          markAcquisitionOutcome(rt.db, args.pushId, args.paperId, 'SELECTED', manual.reason)
+        }
+        return manual
       }
 
       const paper = rowToRef(row)
       const candidates = await rt.registry.pdfCandidates(paper)
-      const wantInstitutional = args.allowInstitutional || args.allowCarsi === true
       if (candidates.length === 0 && !(wantInstitutional && rt.providers.length > 0)) {
-        return jsonSafe({
+        const out = {
           paperId: args.paperId,
-          outcome: 'FULLTEXT_UNAVAILABLE',
+          outcome: 'FULLTEXT_UNAVAILABLE' as const,
           attempts: [],
           reason: 'no legal PDF candidate from any adapter',
-        })
+        }
+        if (args.pushId !== undefined) markAcquisitionOutcome(rt.db, args.pushId, args.paperId, 'FULLTEXT_UNAVAILABLE', out.reason)
+        return jsonSafe(out)
+      }
+
+      // All guards passed → this is a real acquisition attempt: consume the
+      // attempt slot now (preflight normally allocated it; manual/edge paths
+      // allocate here). A rejected call never consumes a slot.
+      if (args.pushId !== undefined) {
+        const turn = ensureAcquisitionTurn(rt.db, args.pushId, args.paperId, rt.cfg)
+        if (turn.attemptOrder === null) allocateAttemptOrder(rt.db, args.pushId, args.paperId)
       }
 
       // Institutional provider chain: opt-in + enabled + maxPerPush success cap.
       // (minIntervalMinutes spacing is enforced inside each provider ledger.)
-      let providers: NonNullable<Parameters<typeof fetchPdf>[4]>['providers'] = []
-      let capBlocked = false
       if (wantInstitutional && rt.providers.length > 0) {
         const maxPerPush = Math.min(rt.cfg.publisherBrowser.maxPerPush, rt.cfg.carsi.maxPerPush)
         const done = args.pushId !== undefined ? institutionalSuccessCount(rt, args.pushId) : 0
         if (done >= maxPerPush) {
-          capBlocked = true
-        } else {
-          providers = rt.providers
+          // Per-push acquisition budget exhausted: park on the SAME rank as a
+          // RATE_LIMITED-style terminal WITHOUT writing a FULLTEXT_UNAVAILABLE
+          // fetch_log row (that would arm the 72h cooldown). The agent must
+          // stop acquisition for this push rather than degrade to a lower
+          // ranked candidate.
+          const reason = `机构访问每推送上限已满（maxPerPush=${maxPerPush}）：本推送不可再尝试机构获取；保持当前 Rank，不得降级到下一候选`
+          if (args.pushId !== undefined) markAcquisitionOutcome(rt.db, args.pushId, args.paperId, 'RATE_LIMITED', reason)
+          return jsonSafe({
+            paperId: args.paperId,
+            outcome: 'RATE_LIMITED',
+            attempts: [],
+            reason,
+          })
         }
       }
 
@@ -226,7 +276,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
         timeoutMs: rt.cfg.http.timeoutMs,
         minPdfBytes: rt.cfg.http.minPdfBytes,
         fetchImpl: rt.fetchImpl,
-        providers,
+        providers: wantInstitutional && rt.providers.length > 0 ? rt.providers : [],
         paper,
       })
       if (args.pushId !== undefined) {
@@ -236,11 +286,10 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
         })
       }
       const out: FetchPdfOutput = { paperId: args.paperId, ...result }
-      if (capBlocked && result.outcome === 'FULLTEXT_UNAVAILABLE') {
-        out.reason = `机构访问每推送上限已满（maxPerPush=${Math.min(rt.cfg.publisherBrowser.maxPerPush, rt.cfg.carsi.maxPerPush)}），本次未尝试机构访问`
-      }
-      if (result.outcome === 'AUTH_REQUIRED') {
-        out.userAction = 'publisher_login'
+      if (out.outcome === 'AUTH_REQUIRED') out.userAction = 'publisher_login'
+      if (args.pushId !== undefined) {
+        const mapped = out.outcome === 'ok' || out.outcome === 'PDF_OK' ? 'SELECTED' : out.outcome === 'failed' ? 'PDF_FAILED' : out.outcome
+        markAcquisitionOutcome(rt.db, args.pushId, args.paperId, mapped, out.reason ?? result.attempts.map((a) => `${a.source}:${a.status}`).join(', '))
       }
       return jsonSafe(out)
     },

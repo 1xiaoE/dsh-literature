@@ -136,13 +136,13 @@ interface SourceAdapter {
 - **curriculum_value**：回答"对系统学习当前阶段，这篇论文是否核心/代表性/值得优先读"。agent 评分（foundational importance / method centrality / learning value / representativeness / prerequisite suitability；过于具体的应用/机构设计案例低分）；程序侧给 `curriculum_hint`（centrality 关键词 + 顶级 venue 加分，case-study 词减分）。Fundamentals 阶段 `curriculumWeight=0.35` 提高权重。门槛 `curriculumValueThreshold=0.5`，与 stage_relevance 门控并列强制。
 - **Knowledge goals**：每阶段 `knowledgeGoals[{id,label,keywords}]`；Fundamentals 定义 template dynamics / balance & stability / contact & force / impedance & compliance / whole-body locomotion 5 个目标。成功精读论文由 agent 标记覆盖的 goals（`knowledge_coverage` 表 + `stages.covered_goals`）；候选带 `knowledgeGapHint`（未覆盖 goal 的关键词命中数，进入预排序权重）。
 - **阶段推进**：`papers_in_stage >= target` 且 `coveredGoals >= minKnowledgeCoverage`（默认 3）双条件满足才推进；`advanceStage=true` 强制。
-- **全文选择协议**：语义排序后按排名依次 `literature_pdf_preflight`（有界探测，不落盘）；取排名最高且 quality gates + fulltext 均达标的论文；选择轨迹落库 `selection_rank/selection_outcome/selection_rejection_reason`（如 rank1: FULLTEXT_UNAVAILABLE → rank2: SELECTED）。所有达标候选均无全文才 `fulltext_unavailable`。禁止"Top 1 无全文 → 整轮失败"，也禁止"PDF 可得就选低质量论文"。
+- **全文选择协议（DB v15 硬状态机）**：BATCH 语义评分后先调用 `literature_rank_candidates` 固化唯一 `agent_rank`；每个质量门达标候选必须按 `RankN → public preflight → public fetch → publisher_browser` 完成整条 acquisition chain 后才可考虑下一 Rank。`AUTH_REQUIRED / RATE_LIMITED` 均停留当前 Rank；仅 `ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE / PDF_FAILED` 可下移。`literature_pdf_preflight` / `literature_fetch_pdf` 会硬拒绝跳 Rank，`SELECTED` 后硬停止。
 - **Landmark 增强**：`landmark_confidence`（seeds→1.0，否则 eligibility/impact/venue/hint 合成）+ `methodological_centrality`（agent 评分）；`StageDef.landmarkSeeds` 支持每阶段配置少量 curated seeds（接口就绪，暂不建大表）。
 
 ## 3d. Selection 语义拆分、Knowledge-gap 引导、Curated Seeds（V0.3 收口）
 
 - **selection 语义拆分**（DB v5）：`agent_rank`（语义排名，final_score 序或 agent 显式指定）与 `preflight_attempt_order`（预检顺序，1-based 连续）分离；`selection_outcome` / `selection_rejection_reason` 独立记录。弃用混义的 `selection_rank`。
-- **不变式**（程序强制 + 测试）：attemptOrder 必须 1..n 连续；一旦 SELECTED 出现，之后不得再有更高 attemptOrder 条目；每 push 至多一个 SELECTED；picked 论文必须在其 selection 条目中为 SELECTED。`literature_pdf_preflight` / `literature_fetch_pdf` 携带 pushId 时在 SELECTED 后拒绝新的预检/下载。
+- **不变式**（程序强制 + 测试）：语义评分先固化全局 `agent_rank`；`attemptOrder` 必须对应当前最高的质量门达标候选且 1..n 连续；`AUTH_REQUIRED / RATE_LIMITED` 不推进队列；只有论文级终态才推进；一旦 SELECTED 出现，之后不得再有 acquisition；每 push 至多一个 SELECTED。
 - **priority knowledge goal**：= 阶段 knowledgeGoals 顺序中第一个未覆盖 goal（Fundamentals 顺序：balance_stability → impedance_compliance → template_dynamics → contact_force → whole_body）。候选带 `priorityGoalMatch`，进入预排序权重 `priorityGoal`（0.1）；agent curriculum 排序同样对 priority goal 匹配显著加权——不绕过质量门。
 - **curated landmark seeds**（仅检索/课程锚点，不绕过任何门槛）：Fundamentals 配置 2 颗——VMC（Pratt 2001，goals: impedance_compliance + balance_stability）、Instantaneous Capture Input（Pratt 2006，goals: template_dynamics + balance_stability）。seeds 无条件进入 landmark 池（landmark_confidence=1，curriculum hint 下限 0.75），其标题作为 landmark 检索锚查询；无全文时不强制选择，可扩展相关候选。
 
@@ -169,7 +169,17 @@ interface SourceAdapter {
 - **priority_goal_match 写入修复**：此前 `literature_sources` 的 candidate INSERT/UPDATE 不含 `priority_goal_match` 列——preRank 计算并消费了该信号（权重 `ranking.priorityGoal`，默认 0.1），但**从未写入 SQLite**，DB 恒为 DEFAULT 0。修复：INSERT + ON CONFLICT UPDATE 均写入。
 - **匹配强度数值化**：`priorityGoalMatchScore(text, goal)` 返回 0~1 强度（0.35/命中概念，封顶 1.0），替代原 0/1 布尔；`preRank` 按数值消费权重。DB v9 将 `candidates.priority_goal_match` 重建为 `REAL NOT NULL DEFAULT 0`（旧 0/1 数据无损保留）。
 - **keyword 概念映射补全**：`gait_representation` 增 `gait synthesis / gait pattern / gait cycle / footstep / step-to-step`；`impedance_compliance` 增 `impedance control / compliance control / stiffness control / damper / spring / spring-damper / force position compliance`（此前 Paredes & Hereid 2022 的 "footstep location" 无法命中 gait 概念）。
-- **全文阅读 coverage provenance**：`literature_record`（completed）计算并持久化到 pushes：`total_chunks`（indexed chunk 数）、`read_chunks`（fulltext_reads distinct seq）、`read_coverage`、`coverage_basis`（`full_read` 全部 read；`index_exposed` 未读 chunk 的 preview 已由 `literature_fulltext_index` 暴露——报告必须如实写 M/N，**禁止** read_coverage<1 时声称"全部精读"；`read_log` 无 index）。push_now 指令要求报告记录四字段。
+- **全文阅读 coverage provenance**：`literature_record`（completed）计算并持久化到 pushes；默认 `fulltext.minReadCoverage=1.0`，因此所有 indexed chunks 必须 read 后才能 completed：`total_chunks`（indexed chunk 数）、`read_chunks`（fulltext_reads distinct seq）、`read_coverage`、`coverage_basis`（`full_read` 全部 read；`index_exposed` 未读 chunk 的 preview 已由 `literature_fulltext_index` 暴露——报告必须如实写 M/N，**禁止** read_coverage<1 时声称"全部精读"；`read_log` 无 index）。push_now 指令要求报告记录四字段。
+
+## 3h. Quality-First 硬状态机与确定性收口（DB v15）
+
+- 新增 `literature_rank_candidates`：BATCH 评分完成后一次性持久化语义分数、`final_score` 与稳定唯一的 `agent_rank`，任何 PDF 操作前必须完成。
+- `candidates` 新增 `public_preflight_status / acquisition_outcome / acquisition_reason`；`RATE_LIMITED` 是非终态，禁止伪装成 `PDF_NOT_FOUND`。
+- publisher_browser 的 per-domain 限流被阻塞时**不再写 lastAttempt**，避免反复重试形成滑动锁死。
+- `literature_record` 与 0-LLM `--resume` 共用 `finalizeCompletedPush`：统一校验质量门、SELECTED、全文阅读覆盖、canonical 报告，并在同一事务中完成 `picked / knowledge_coverage / stage progression / completed`。
+- 新 push 将规范化配置写入 `pushes.policy_json`；CLI resume 使用创建时 policy snapshot，避免配置漂移。旧 push 无 snapshot 时安全回退到 agent resume。
+- 性能计数 flush 仅覆盖明确提供的数值，避免 `undefined` 擦掉 earlier-tool 已记录的 `agentRankingMs / llmCallCount`。
+- 检索延迟优化：普通源每 pool 默认最多 8 条均衡 query，并以 `sourceConcurrency=4` 有界并发；arXiv 每 pool 默认最多 4 条均衡核心 query，仍严格保持 ≥3.1 s 串行间隔。以基础阶段原 12+12 planned queries 计，arXiv 最坏请求数从 24 降到 8（无 429 时仅调度等待理论上约从 71 s 降到 22 s）。
 
 ## 4. 两阶段 Ranking（调整 3）与 Stage Relevance（约束）
 

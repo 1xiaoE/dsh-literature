@@ -206,6 +206,19 @@ describe('publisher_browser provider', () => {
     expect(provider.shouldAttemptFor('ieeexplore.ieee.org', new Date(Date.now() + 1000)).ok).toBe(true)
   })
 
+  it('6a. a rate-limited retry does not refresh the timestamp or increment attempts (no sliding lockout)', async () => {
+    const dir = tempDir('gate-noslide')
+    const provider = makeProvider(dir, stubLauncher({}), { minIntervalMinutes: 2 })
+    const t0 = new Date(Date.now() - 30_000)
+    provider.markAttemptFor('publisher.example', t0, 'PDF_NOT_FOUND')
+    const before = await provider.sessionStatus() as { attemptsCount?: number; lastAttemptByDomain?: Record<string, string> }
+    const res = await provider.fetch(PAPER, { pdfsDir: dir, timeoutMs: 5000, minPdfBytes: 10240 })
+    expect(res.outcome).toBe('RATE_LIMITED')
+    const after = await provider.sessionStatus() as { attemptsCount?: number; lastAttemptByDomain?: Record<string, string> }
+    expect(after.attemptsCount).toBe(before.attemptsCount)
+    expect(after.lastAttemptByDomain?.['publisher.example']).toBe(before.lastAttemptByDomain?.['publisher.example'])
+  })
+
   it('6b. publisher domain resolution maps DOI prefixes to hosts', async () => {
     const { publisherDomainOf } = await import('../src/providers/publisher_browser.js')
     expect(publisherDomainOf({ id: 'doi:10.1109/x', title: 'T', authors: [], doi: '10.1109/abc', metadataSource: 'crossref' })).toBe('ieeexplore.ieee.org')

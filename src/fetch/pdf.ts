@@ -22,6 +22,7 @@ export type FetchOutcome =
   | 'ok' // public/open-access candidate
   | 'PDF_OK' // institutional provider success
   | 'AUTH_REQUIRED'
+  | 'RATE_LIMITED'
   | 'ACCESS_DENIED'
   | 'PDF_NOT_FOUND'
   | 'FULLTEXT_UNAVAILABLE'
@@ -35,6 +36,7 @@ export type FetchAttemptStatus =
   | 'network_error'
   | 'skipped'
   | 'auth_required'
+  | 'rate_limited'
   | 'access_denied'
   | 'not_found'
 
@@ -92,7 +94,9 @@ function attemptOfProvider(name: string, r: ProviderResult): FetchAttempt {
       ? 'ok'
       : r.outcome === 'AUTH_REQUIRED'
         ? 'auth_required'
-        : r.outcome === 'ACCESS_DENIED'
+        : r.outcome === 'RATE_LIMITED'
+          ? 'rate_limited'
+          : r.outcome === 'ACCESS_DENIED'
           ? 'access_denied'
           : 'not_found'
   return { source: name, url: r.url ?? '-', status, http: r.http, detail: r.reason }
@@ -222,15 +226,15 @@ export async function fetchPdf(
   return { outcome, attempts }
 }
 
-/** Strongest provider failure among the attempt trail (AUTH > DENIED > NOT_FOUND). */
+/** Strongest provider failure among the attempt trail (AUTH > RATE_LIMITED > DENIED > NOT_FOUND). */
 function strongestProviderFailure(attempts: FetchAttempt[]): FetchOutcome | undefined {
   if (attempts.some((a) => a.status === 'auth_required')) return 'AUTH_REQUIRED'
+  if (attempts.some((a) => a.status === 'rate_limited')) return 'RATE_LIMITED'
   if (attempts.some((a) => a.status === 'access_denied')) return 'ACCESS_DENIED'
   if (attempts.some((a) => a.status === 'not_found')) return 'PDF_NOT_FOUND'
-  // All provider entries were 'skipped' (low-frequency gate / disabled): no
-  // provider actually attempted the paper, so this is NOT a paper-level
-  // FULLTEXT_UNAVAILABLE (which would arm the 72h retry cooldown). Report a
-  // benign PDF_NOT_FOUND instead — the caller may retry once the gate opens.
+  // Disabled providers may still appear as skipped; they do not turn the
+  // paper into FULLTEXT_UNAVAILABLE. A real low-frequency gate is represented
+  // explicitly as RATE_LIMITED by the provider.
   if (attempts.some((a) => a.status === 'skipped')) return 'PDF_NOT_FOUND'
   return undefined
 }

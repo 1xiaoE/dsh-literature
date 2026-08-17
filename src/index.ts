@@ -19,6 +19,7 @@ import { defineLiteraturePushNow } from './tools/literature_push_now.js'
 import { defineLiteratureUserAction } from './tools/literature_user_action.js'
 import { defineLiteratureResume } from './tools/literature_resume.js'
 import { defineLiteratureReportWrite } from './tools/literature_report_write.js'
+import { defineLiteratureRankCandidates } from './tools/literature_rank_candidates.js'
 
 export const name = 'dsh-literature'
 export const inject = ['tools']
@@ -57,6 +58,7 @@ export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
 
   for (const tool of [
     defineLiteratureSources(getRt),
+    defineLiteratureRankCandidates(getRt),
     defineLiteratureFetchPdf(getRt),
     defineLiteraturePdfPreflight(getRt),
     defineLiteratureFulltextIndex(getRt),

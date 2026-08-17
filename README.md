@@ -109,7 +109,7 @@ Stages define scope, keywords, knowledge goals, `requiredGoals`, and curated lan
 
 ## Full-text Handling
 
-**Quality First, Access Second**: papers are ranked on academic merit (topic / stage / curriculum / venue / learning value / knowledge gap); fulltext acquisition happens rank-by-rank afterwards and never overrides quality. Order per candidate: arXiv/OA → Unpaywall → publisher links → publisher_browser (DOI direct resolution → publisher article page → PDF) → `FULLTEXT_UNAVAILABLE`. A login wall parks the push as `AUTH_REQUIRED` (HITL: `bin/dsh-literature-browser-login`), not a fake failure. Every download is validated (HTTP / Content-Type / %PDF- magic / non-HTML / size / sha256); text is chunked and read token-safely; `total_chunks / read_chunks / read_coverage / coverage_basis` are recorded per push.
+**Quality First, Access Second**: papers are batch-scored first and `literature_rank_candidates` freezes a unique `agent_rank`; a hard acquisition state machine then completes the full chain for one rank before any lower rank can start. Per candidate: public/OA preflight → public download chain → publisher_browser (DOI resolution → article page → PDF). `AUTH_REQUIRED` and `RATE_LIMITED` stay on the same rank; only explicit paper-level terminal outcomes (`ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE / PDF_FAILED`) allow advancing. A login wall parks the push as `AUTH_REQUIRED` (HITL: `bin/dsh-literature-browser-login`), not a fake failure. Every download is validated (HTTP / Content-Type / %PDF- magic / non-HTML / size / sha256); text is chunked and read token-safely; `total_chunks / read_chunks / read_coverage / coverage_basis` are recorded per push.
 
 ## Human-in-the-loop
 

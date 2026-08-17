@@ -20,6 +20,7 @@ import { startPush } from '../src/lib/history.js'
 import { tryDeterministicFinalize } from '../src/lib/resume.js'
 import { openUserAction } from '../src/lib/user_actions.js'
 import { defineLiteratureReportWrite } from '../src/tools/literature_report_write.js'
+import { defineLiteraturePushNow } from '../src/tools/literature_push_now.js'
 
 function setup(): { rt: LiteratureRuntime; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-rep-'))
@@ -52,9 +53,8 @@ async function buildReadyPush(rt: LiteratureRuntime, pushId: number, paperId: st
   rt.db
     .prepare("INSERT INTO fulltexts (paper_id, status, parser, char_count, chunk_count) VALUES (?, 'ok', 'pdftotext', 1000, 8)")
     .run(paperId)
-  rt.db
-    .prepare('INSERT INTO fulltext_reads (push_id, paper_id, seq) VALUES (?, ?, 0)')
-    .run(pushId, paperId)
+  const insRead = rt.db.prepare('INSERT INTO fulltext_reads (push_id, paper_id, seq) VALUES (?, ?, ?)')
+  for (let seq = 0; seq < 8; seq += 1) insRead.run(pushId, paperId, seq)
   const rw = defineLiteratureReportWrite(() => rt)
   const rep = (await run(rw, {
     pushId, stageLabel: '基础控制', filename: 'T_2024_report.md', content: '# 精读报告\n正文',
@@ -138,7 +138,7 @@ describe('F/G/H: deterministic resume (0-LLM finalize)', () => {
     const beforeFulltext = (rt.db.prepare('SELECT COUNT(*) n FROM fulltexts').get() as { n: number }).n
     const beforeReads = (rt.db.prepare('SELECT COUNT(*) n FROM fulltext_reads').get() as { n: number }).n
 
-    const res = tryDeterministicFinalize(rt.db, pushId, { now: () => 1_000_000 })
+    const res = tryDeterministicFinalize(rt.db, pushId, { now: () => 1_000_000, config: rt.cfg })
     expect(res.finalized).toBe(true) // F: no LLM involved
     expect(res.resumeLlmCallCount).toBe(0)
     expect(res.resumeMs).toBeGreaterThanOrEqual(0)
@@ -158,6 +158,25 @@ describe('F/G/H: deterministic resume (0-LLM finalize)', () => {
     }
     expect(row.status).toBe('completed')
     expect(row.resume_llm_call_count).toBe(0)
+    const picked = rt.db.prepare('SELECT picked FROM candidates WHERE push_id = ? AND paper_id = ?').get(pushId, paperId) as { picked: number }
+    expect(picked.picked).toBe(1) // same durable finalize core as literature_record
+    expect(getStageCount(rt, 'legged_robot_control')).toBe(1)
+    rt.db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('new pushes can 0-LLM finalize from their persisted policy snapshot (CLI resume path)', async () => {
+    const { rt, dir } = setup()
+    const pushNow = defineLiteraturePushNow(() => rt, () => null)
+    const started = (await run(pushNow, {})) as { pushId: number }
+    const pushId = started.pushId
+    const paperId = 'arxiv:2208.01787'
+    await buildReadyPush(rt, pushId, paperId)
+    const snap = rt.db.prepare('SELECT policy_json FROM pushes WHERE id = ?').get(pushId) as { policy_json: string | null }
+    expect(snap.policy_json).toBeTruthy()
+    const res = tryDeterministicFinalize(rt.db, pushId) // deliberately no runtime config
+    expect(res.finalized).toBe(true)
+    expect(res.resumeLlmCallCount).toBe(0)
     rt.db.close()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -196,7 +215,7 @@ describe('F/G/H: deterministic resume (0-LLM finalize)', () => {
     rt.db.prepare("UPDATE pushes SET paper_id = ?, status = 'running' WHERE id = ?").run(paperId, pushId)
     const res = tryDeterministicFinalize(rt.db, pushId)
     expect(res.finalized).toBe(false)
-    expect(res.reason).toMatch(/报告缺失/)
+    expect(res.reason).toMatch(/报告.*缺失/)
     rt.db.close()
     rmSync(dir, { recursive: true, force: true })
   })
@@ -215,4 +234,9 @@ describe('F/G/H: deterministic resume (0-LLM finalize)', () => {
 
 function readdirOf(p: string): string[] {
   return readdirSync(p)
+}
+
+function getStageCount(rt: LiteratureRuntime, topic: string): number {
+  const row = rt.db.prepare('SELECT papers_in_stage FROM stages WHERE topic = ?').get(topic) as { papers_in_stage: number }
+  return row.papers_in_stage
 }

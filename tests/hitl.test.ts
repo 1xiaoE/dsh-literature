@@ -264,7 +264,7 @@ describe('manual PDF registration (HITL download channel)', () => {
     const src = join(dir, 'user-download.pdf')
     writeFileSync(src, makePdf('Abstract We propose a whole-body MPC controller. ' + 'padding padding padding padding padding padding '.repeat(600)))
     const fetchTool = defineLiteratureFetchPdf(() => rt)
-    const res = await run(fetchTool, { paperId: 'doi:10.1000/hitl', pushId: 0, manualPdfPath: src })
+    const res = await run(fetchTool, { paperId: 'doi:10.1000/hitl', manualPdfPath: src })
     expect(res.outcome).toBe('PDF_OK')
     expect(res.sha256).toHaveLength(64)
     expect(res.pdfSource).toMatch(/^manual:/)
@@ -372,7 +372,7 @@ describe('v8 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v8-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(14)
+    expect(version.user_version).toBe(15)
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>
     expect(tables.map((t) => t.name)).toContain('user_actions')
     // CHECK constraint accepts the new status

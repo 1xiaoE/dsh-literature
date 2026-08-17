@@ -141,6 +141,52 @@ export function mergeWithLabels(
   return out
 }
 
+/**
+ * Keep query coverage while respecting a per-source request budget. We round-
+ * robin canonical / stage / secondary queries; landmark stage queries also
+ * alternate from the end so curated seed-title anchors (appended by planner)
+ * are not starved by the cap.
+ */
+export function selectQueriesForBudget(queries: PlannedQuery[], maxQueries: number): PlannedQuery[] {
+  if (maxQueries <= 0 || queries.length <= maxQueries) return queries
+  const canonical = queries.filter((q) => q.kind === 'canonical')
+  const secondary = queries.filter((q) => q.kind === 'secondary')
+  const stage = queries.filter((q) => q.kind === 'stage')
+  const out: PlannedQuery[] = []
+  let stageFromEnd = queries[0]?.pool === 'landmark'
+  const takeStage = (): PlannedQuery | undefined => {
+    if (stage.length === 0) return undefined
+    if (stageFromEnd) {
+      stageFromEnd = false
+      return stage.pop()
+    }
+    stageFromEnd = true
+    return stage.shift()
+  }
+  while (out.length < maxQueries && (canonical.length || stage.length || secondary.length)) {
+    for (const take of [() => canonical.shift(), takeStage, () => secondary.shift()]) {
+      if (out.length >= maxQueries) break
+      const q = take()
+      if (q) out.push(q)
+    }
+  }
+  return out
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i]!)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker()))
+  return out
+}
+
 export class SourceRegistry {
   private readonly adapters: SourceAdapter[] = []
 
@@ -161,8 +207,9 @@ export class SourceRegistry {
   }
 
   private retrievalAdapters(): SourceAdapter[] {
-    // crossref search is not a relevance signal — exclude from candidate retrieval
-    return this.adapters.filter((a) => a.name !== 'crossref')
+    // Crossref is metadata completion and Unpaywall is an OA locator; neither
+    // is a candidate-relevance search source. Keep them out of query fan-out.
+    return this.adapters.filter((a) => a.name !== 'crossref' && a.name !== 'unpaywall')
   }
 
   /**
@@ -185,14 +232,23 @@ export class SourceRegistry {
     let raw = 0
 
     for (const adapter of this.retrievalAdapters()) {
-      for (const q of queries) {
-        let hits: SearchHit[] = []
+      const budget = adapter.name === 'arxiv' ? cfg.retrieval.arxivMaxQueriesPerPool : cfg.retrieval.maxQueriesPerPool
+      const adapterQueries = selectQueriesForBudget(queries, budget)
+      const one = async (q: PlannedQuery): Promise<SearchHit[]> => {
         try {
-          hits = await adapter.search({ ...params, queries: [q] })
+          return await adapter.search({ ...params, queries: [q] })
         } catch (err) {
           console.warn(`[dsh-literature] ${adapter.name} search failed: ${String(err)}`)
-          continue
+          return []
         }
+      }
+      // arXiv owns a strict serialized scheduler (>=3.1s); keep the outer loop
+      // serial too. Other HTTP sources use bounded concurrency to avoid a
+      // 20+ query latency waterfall without turning into an unbounded fan-out.
+      const batches = adapter.name === 'arxiv'
+        ? await (async () => { const r: SearchHit[][] = []; for (const q of adapterQueries) r.push(await one(q)); return r })()
+        : await mapWithConcurrency(adapterQueries, cfg.retrieval.sourceConcurrency, one)
+      for (const hits of batches) {
         allHits.push(...hits.map((h) => ({ ...h, source: adapter.name, authMode: adapter.authMode })))
         raw += hits.length
       }

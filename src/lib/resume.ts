@@ -12,10 +12,10 @@
  * paper, missing fulltext, missing canonical report, open user actions),
  * the caller falls back to the LLM-driven resume (literature_resume tool).
  */
-import { existsSync, statSync } from 'node:fs'
 import type { Db } from '../db.js'
-import { getPush } from './history.js'
+import type { LiteratureConfig } from '../config.js'
 import { openActionsOfPush } from './user_actions.js'
+import { finalizeCompletedPush } from './finalize.js'
 
 export interface DeterministicFinalizeResult {
   finalized: boolean
@@ -44,14 +44,14 @@ export interface DeterministicFinalizeResult {
 export function tryDeterministicFinalize(
   db: Db,
   pushId: number,
-  opts: { now?: () => number } = {},
+  opts: { now?: () => number; config?: LiteratureConfig } = {},
 ): DeterministicFinalizeResult {
   const now = opts.now ?? (() => Date.now())
   const started = now()
   const push = db
-    .prepare('SELECT id, topic, stage, status, paper_id, report_path, started_at FROM pushes WHERE id = ?')
+    .prepare('SELECT id, topic, stage, status, paper_id, report_path, started_at, policy_json FROM pushes WHERE id = ?')
     .get(pushId) as
-    | { id: number; topic: string; stage: number; status: string; paper_id: string | null; report_path: string | null; started_at: string }
+    | { id: number; topic: string; stage: number; status: string; paper_id: string | null; report_path: string | null; started_at: string; policy_json: string | null }
     | undefined
   if (!push) return { finalized: false, reason: `push #${pushId} 不存在` }
   if (push.status === 'completed') {
@@ -84,29 +84,55 @@ export function tryDeterministicFinalize(
     return { finalized: false, reason: `push #${pushId} 无选中论文（SELECTED/picked 缺失）— 需要 agent 完成选择` }
   }
 
-  // 3. fulltext indexed
-  const ft = db
-    .prepare("SELECT status FROM fulltexts WHERE paper_id = ? AND status = 'ok'")
-    .get(paperId) as { status: string } | undefined
-  if (!ft) {
-    return { finalized: false, reason: `push #${pushId} 论文 ${paperId} 无已索引全文 — 需要 agent 完成下载/精读` }
-  }
-
-  // 4. canonical report exists and is non-empty
+  // 3. Full completion is delegated to the SAME finalize core used by
+  // literature_record. This prevents a 0-LLM resume from marking completed
+  // while forgetting picked/knowledge_coverage/stage progression.
   const reportPath = push.report_path
-  if (!reportPath || !existsSync(reportPath) || statSync(reportPath).size <= 0) {
-    return { finalized: false, reason: `push #${pushId} canonical 报告缺失或为空（${reportPath ?? '无路径'}）— 需要 agent 调用 literature_report_write` }
+  if (!reportPath) {
+    return { finalized: false, reason: `push #${pushId} canonical 报告路径缺失 — 需要 agent 调用 literature_report_write` }
+  }
+  const goals = db
+    .prepare('SELECT goal FROM knowledge_coverage WHERE push_id = ? AND paper_id = ? ORDER BY goal')
+    .all(pushId, paperId) as Array<{ goal: string }>
+
+  // Prefer an explicit runtime config (tests/in-process resume). For CLI resume,
+  // use the normalized policy snapshot persisted when the push started. Old
+  // pushes that predate policy snapshots safely fall back to the agent path.
+  let cfg = opts.config
+  if (!cfg && push.policy_json) {
+    try {
+      cfg = JSON.parse(push.policy_json) as LiteratureConfig
+    } catch {
+      // handled by the safe fallback below
+    }
+  }
+  if (!cfg) {
+    return {
+      finalized: false,
+      reason: `push #${pushId} 缺少创建时的 policy snapshot；为避免阶段/门槛配置漂移，安全回退到 literature_record`,
+    }
+  }
+  try {
+    finalizeCompletedPush(db, cfg, {
+      pushId,
+      paperId,
+      reportPath,
+      knowledgeGoals: goals.map((g) => g.goal),
+      notes: '[deterministic resume finalize]',
+    })
+  } catch (err) {
+    return {
+      finalized: false,
+      reason: `push #${pushId} 无法安全确定性收口：${err instanceof Error ? err.message : String(err)}`,
+    }
   }
 
-  // 5. finalize: mark completed, record deterministic-resume provenance
   const resumeMs = Math.max(0, now() - started)
   db.prepare(
-    `UPDATE pushes SET status = 'completed', finished_at = datetime('now'),
-       error_code = NULL, error_detail = NULL, paper_id = ?,
-       resume_ms = ?, resume_llm_call_count = 0,
-       notes = COALESCE(notes, '') || ' [deterministic resume finalize]'
+    `UPDATE pushes SET resume_ms = ?, resume_llm_call_count = 0,
+       notes = COALESCE(notes, '') || ' [resume_llm=0]'
      WHERE id = ?`,
-  ).run(paperId, resumeMs, pushId)
+  ).run(resumeMs, pushId)
   return {
     finalized: true,
     pushId,

@@ -10,7 +10,7 @@
  * - push_now instructions mandate BATCH semantic ranking (no per-paper LLM
  *   fan-out).
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -82,6 +82,21 @@ describe('PerfTracker', () => {
   })
 })
 
+describe('PerfTracker undefined override regression', () => {
+  it('does not erase earlier metrics when final record omits optional overrides', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-perf-undef-'))
+    const db = openDb(dir)
+    const pushId = startPush(db, 't', 1).pushId
+    const tracker = new PerfTracker()
+    tracker.add(pushId, { agentRankingMs: 321, llmCallCount: 1 })
+    const out = tracker.flush(db, pushId, { agentRankingMs: undefined, llmCallCount: undefined })
+    expect(out.agentRankingMs).toBe(321)
+    expect(out.llmCallCount).toBe(1)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+})
+
 describe('literature_sources performance recording', () => {
   it('records retrieval_ms / deterministic_ranking_ms / raw / deterministic candidates', async () => {
     const { rt, dir } = setup()
@@ -137,6 +152,10 @@ describe('literature_record perf flush (agent-reported phases + total_ms)', () =
          VALUES (?, ?, 1, 0, 0.8, 0.7, 'SELECTED', 1, 1, 'recent', 0)`,
       )
       .run(pushId, paperId)
+    rt.db.prepare("INSERT INTO fulltexts (paper_id, status, parser, char_count, chunk_count) VALUES (?, 'ok', 'test', 100, 1)").run(paperId)
+    rt.db.prepare('INSERT INTO fulltext_reads (push_id, paper_id, seq) VALUES (?, ?, 0)').run(pushId, paperId)
+    const reportPath = join(dir, 'perf-report.md')
+    writeFileSync(reportPath, '# perf report\n')
     rt.perf.add(pushId, { retrievalMs: 1200, deterministicRankingMs: 40, pdfDownloadMs: 900, parsingMs: 300, fulltextReadMs: 2500 })
 
     const recordTool = defineLiteratureRecord(() => rt, () => null)
@@ -158,6 +177,7 @@ describe('literature_record perf flush (agent-reported phases + total_ms)', () =
       ],
       selection: [{ paperId, agentRank: 1, attemptOrder: 1, outcome: 'SELECTED', reason: 'ok' }],
       knowledgeGoals: ['impedance_compliance'],
+      reportPath,
       agentRankingMs: 4500,
       reportGenerationMs: 8000,
       llmCallCount: 2,
@@ -204,7 +224,7 @@ describe('v10 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v10-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(14)
+    expect(version.user_version).toBe(15)
     const cols = (db.prepare('PRAGMA table_info(pushes)').all() as Array<{ name: string }>).map((c) => c.name)
     for (const c of ['retrieval_ms', 'deterministic_ranking_ms', 'agent_ranking_ms', 'pdf_preflight_ms', 'pdf_download_ms', 'parsing_ms', 'fulltext_read_ms', 'report_generation_ms', 'total_ms', 'raw_candidates', 'deterministic_candidates', 'agent_scored_candidates', 'llm_call_count', 'llm_retry_count', 'pdf_attempt_count']) {
       expect(cols, c).toContain(c)

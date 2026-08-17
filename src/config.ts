@@ -98,6 +98,12 @@ export interface RetrievalConfig {
   landmarkMinHint: number
   /** candidates with lower topic similarity are dropped as off-topic noise */
   minTopicSimilarity: number
+  /** maximum planned queries per pool for normal retrieval adapters (0 = unlimited) */
+  maxQueriesPerPool: number
+  /** stricter per-pool query budget for the rate-limited arXiv API (0 = unlimited) */
+  arxivMaxQueriesPerPool: number
+  /** bounded concurrency for non-arXiv retrieval adapters */
+  sourceConcurrency: number
 }
 
 export interface LiteratureConfig {
@@ -143,6 +149,8 @@ export interface LiteratureConfig {
     parserCommand: string
     /** hours a FULLTEXT_UNAVAILABLE outcome stays in retry cooldown */
     retryCooldownHours: number
+    /** minimum fraction of indexed chunks that must be read before completion (0..1) */
+    minReadCoverage: number
   }
   http: {
     /** per-request timeout for source adapters and PDF downloads (ms) */
@@ -267,6 +275,9 @@ export const DEFAULT_RETRIEVAL: RetrievalConfig = {
   landmarkMinScore: 0.35,
   landmarkMinHint: 0.25,
   minTopicSimilarity: 0.1,
+  maxQueriesPerPool: 8,
+  arxivMaxQueriesPerPool: 4,
+  sourceConcurrency: 4,
 }
 
 /** Default stage progression for 足式机器人控制. */
@@ -540,7 +551,7 @@ export function defaultConfig(): LiteratureConfig {
     retrieval: { ...DEFAULT_RETRIEVAL },
     ranking: { ...DEFAULT_RANKING_WEIGHTS },
     agentRanking: { ...DEFAULT_AGENT_RANKING_WEIGHTS },
-    fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext', retryCooldownHours: 72 },
+    fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext', retryCooldownHours: 72, minReadCoverage: 1 },
     http: { timeoutMs: 30000, minPdfBytes: 10240, unpaywallEmail: 'dsh-literature@example.org' },
     carsi: {
       // LEGACY / EXPERIMENTAL — DISABLED BY DEFAULT. Normal pushes never
@@ -671,6 +682,9 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
       landmarkMinScore: pickNumber(partial.retrieval, 'landmarkMinScore', base.retrieval.landmarkMinScore),
       landmarkMinHint: pickNumber(partial.retrieval, 'landmarkMinHint', base.retrieval.landmarkMinHint),
       minTopicSimilarity: pickNumber(partial.retrieval, 'minTopicSimilarity', base.retrieval.minTopicSimilarity),
+      maxQueriesPerPool: Math.max(0, Math.floor(pickNumber(partial.retrieval, 'maxQueriesPerPool', base.retrieval.maxQueriesPerPool))),
+      arxivMaxQueriesPerPool: Math.max(0, Math.floor(pickNumber(partial.retrieval, 'arxivMaxQueriesPerPool', base.retrieval.arxivMaxQueriesPerPool))),
+      sourceConcurrency: Math.max(1, Math.floor(pickNumber(partial.retrieval, 'sourceConcurrency', base.retrieval.sourceConcurrency))),
     }
   }
   if (isRecord(partial.ranking)) {
@@ -720,6 +734,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
       minChars: pickNumber(partial.fulltext, 'minChars', base.fulltext.minChars),
       parserCommand: pickString(partial.fulltext, 'parserCommand', base.fulltext.parserCommand),
       retryCooldownHours: pickNumber(partial.fulltext, 'retryCooldownHours', base.fulltext.retryCooldownHours),
+      minReadCoverage: Math.max(0, Math.min(1, pickNumber(partial.fulltext, 'minReadCoverage', base.fulltext.minReadCoverage))),
     }
   }
   if (isRecord(partial.http)) {
