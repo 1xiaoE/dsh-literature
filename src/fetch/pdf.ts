@@ -47,6 +47,8 @@ export interface FetchAttempt {
   http?: number
   /** provider reason (e.g. login-wall message) when applicable */
   detail?: string
+  /** manual registration only: whether the source file was moved (剪切) into the library */
+  moved?: boolean
 }
 
 export interface FetchResult {

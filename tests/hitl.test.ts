@@ -258,7 +258,7 @@ describe('literature_record NEED_USER_ACTION invariants', () => {
 /* ---------------- manual PDF + PDF_OK indexing ---------------- */
 
 describe('manual PDF registration (HITL download channel)', () => {
-  it('literature_fetch_pdf(manualPdfPath) validates, hashes and registers the PDF', async () => {
+  it('literature_fetch_pdf(manualPdfPath) validates, hashes, registers the PDF and MOVES it into the library (剪切语义)', async () => {
     const { rt, dir } = setup()
     seedPaper(rt.db, 'doi:10.1000/hitl')
     const src = join(dir, 'user-download.pdf')
@@ -270,6 +270,9 @@ describe('manual PDF registration (HITL download channel)', () => {
     expect(res.pdfSource).toMatch(/^manual:/)
     expect(res.isOpenAccess).toBe(false)
     expect(existsSync(res.pdfPath!)).toBe(true)
+    // 剪切语义：源文件（用户 Downloads 副本）在入库后被移走，不再残留。
+    expect(existsSync(src)).toBe(false)
+    expect(res.attempts[0]!.moved).toBe(true)
     const log = rt.db.prepare('SELECT outcome, pdf_source, is_open_access FROM fetch_log').get() as {
       outcome: string
       pdf_source: string

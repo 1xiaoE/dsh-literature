@@ -14,6 +14,7 @@ This is a **pure plugin / workflow source repository**: no personal reading libr
 - **Quality First, Access Second** — papers are ranked on academic merit; fulltext acquisition happens rank-by-rank afterwards and never overrides quality (OA availability does not raise academic quality)
 - **Exploration-first recommendation** — already-read papers are excluded from the shortlist and attempted-but-failed ones are decayed (×0.35), so each push surfaces fresh material instead of re-recommending the same "hard" papers forever
 - **Direct Publisher Access** — generic `publisher_browser` provider: DOI direct resolution → publisher article page → PDF; login walls park the push as `AUTH_REQUIRED` (HITL), never a fake failure
+- **Manual PDF cut-in (HITL)** — when the browser session cannot download a PDF automatically, the user downloads it by hand; the agent registers it via `manualPdfPath`, and the file is **moved (剪切) into the library** (`pdfs/<sha256>.pdf`) instead of copied — the `~/Downloads` copy is removed on success, leaving no duplicates
 - **Per-domain rate limit** — attempts are throttled per publisher host (IEEE never blocks Springer); a manual login clears the gate so resume retries immediately
 - **Verified full-text** — legal PDF fallback chain, %PDF- magic / size / sha256 validation, chunked token-safe reading, reading-coverage provenance (`total_chunks / read_chunks / read_coverage / coverage_basis`)
 - **Full SQLite provenance** — papers, scoring traces, fetch log (access_type: `oa` / `institutional` / `manual`, `is_open_access`), retrievals, per-phase timings, stages, user actions
@@ -80,6 +81,8 @@ node bin/dsh-literature-browser-login.mjs --url <article>   # login for a specif
 node bin/dsh-literature-browser-login.mjs --check           # browser session status
 ```
 
+> **手动 PDF 剪切入库**：登录墙/限流时，用户在浏览器里手动下载论文 PDF 到 `~/Downloads`，再把路径告诉 agent；agent 调用 `literature_fetch_pdf(pushId, paperId, manualPdfPath=<path>)` 校验后**剪切**进知识库（源文件不再残留）。详见 [Human-in-the-loop](#human-in-the-loop)。
+
 ### Full acquisition order (per ranked candidate)
 
 ```
@@ -88,6 +91,8 @@ Rank #1 → quality gate pass? → public/OA chain (arXiv / OpenAlex OA / Unpayw
   └─ unavailable → publisher_browser (DOI direct → publisher article page → PDF)
        ├─ PDF_OK → SELECTED
        ├─ AUTH_REQUIRED (login wall) → HITL park, NEVER skip to a lower-quality OA Rank #2
+       │    └─ user logs in (browser-login) OR downloads the PDF by hand
+       │         → literature_fetch_pdf(manualPdfPath) MOVES it into the library (剪切) → SELECTED
        ├─ ACCESS_DENIED (403 / not entitled) → next ranked candidate
        └─ PDF_NOT_FOUND → next ranked candidate
 Then Rank #2, #3, ... — once SELECTED, all further acquisition stops (≤ 1 per push)
@@ -130,6 +135,21 @@ node bin/dsh-literature-push.mjs --resume <pushId>
 
 The login clears all rate-limit timestamps, so the same paper can be retried immediately. If the login succeeds but the institution is not entitled, the provider reports `ACCESS_DENIED` and the pipeline moves to the next ranked candidate.
 
+Manual download flow (preferred when the automated browser still can't fetch the PDF):
+
+```sh
+# 1. while the push is parked (AUTH_REQUIRED / RATE_LIMITED / etc.), download
+#    the article PDF yourself in the headed browser → save to ~/Downloads
+# 2. hand the file path to the agent (e.g. "已下载到 ~/Downloads/xxx.pdf"),
+#    it calls literature_fetch_pdf(pushId, paperId, manualPdfPath=<path>)
+# 3. the PDF is validated (%PDF- / size / sha256) and MOVED (剪切) into the
+#    library as pdfs/<sha256>.pdf — the ~/Downloads copy is removed, so the
+#    original is never left behind as a duplicate
+# 4. resume proceeds to full-text indexing + reading + report as usual
+```
+
+The manual PDF is recorded with `access_type=manual`, `is_open_access=0` (a private, non-OA acquisition), and its provenance (original path, sha256, moved flag) stays in `fetch_log`.
+
 ## Runtime Data
 
 ```
@@ -153,7 +173,7 @@ pnpm test        # vitest
 
 ## Tests
 
-PDF fallback chains, per-domain rate limiting, publisher-browser login-wall classification (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND), %PDF- / size / sha256 validation, institutional/manual provenance (`is_open_access=false`), chunking, ranking (OA decoupled from quality), stage/graduation gates, priority-goal matching, HITL + resume (no re-retrieval/re-ranking), report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init + v13→v14 manual provenance), lossless-JSON output boundary.
+PDF fallback chains, per-domain rate limiting, publisher-browser login-wall classification (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND), %PDF- / size / sha256 validation, manual PDF cut-in (source file moved into the library), institutional/manual provenance (`is_open_access=false`), chunking, ranking (OA decoupled from quality), stage/graduation gates, priority-goal matching, HITL + resume (no re-retrieval/re-ranking), report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init + v13→v14 manual provenance), lossless-JSON output boundary.
 
 ## Current Status
 

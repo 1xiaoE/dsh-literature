@@ -14,6 +14,7 @@
 - **Quality First, Access Second** — 论文先按学术质量排序；全文获取在排序后逐篇进行，绝不覆盖质量（OA 可得性不提高学术质量）
 - **探索优先推荐** — 已读论文从候选短名单排除；尝试过但失败的论文降权（×0.35），每次推送优先展示新材料，避免永远重复推荐同一批"难啃"论文
 - **Direct Publisher Access** — 通用 `publisher_browser` provider：DOI 直连 → 出版社文章页 → PDF；登录墙将推送停驻为 `AUTH_REQUIRED`（HITL），绝不伪装失败
+- **手动 PDF 剪切入库（HITL）** — 自动浏览器无法下载 PDF 时，由用户手动下载；agent 经 `manualPdfPath` 登记，文件**剪切（move）而非复制**进知识库（`pdfs/<sha256>.pdf`）——`~/Downloads` 副本在成功后即被移除，不留重复文件
 - **per-domain 限流** — 按出版社域名限流（IEEE 永不阻塞 Springer）；人工登录即清除限流，resume 可立即重试同一论文
 - **全文验证阅读** — 合法 PDF 回退链、%PDF- 魔数/大小/sha256 校验、分块 token 安全阅读、阅读覆盖率溯源（`total_chunks / read_chunks / read_coverage / coverage_basis`）
 - **完整 SQLite 溯源** — 论文、评分轨迹、抓取日志（access_type: `oa` / `institutional` / `manual`、`is_open_access`）、检索记录、各阶段耗时、阶段、用户待办
@@ -84,6 +85,8 @@ node bin/dsh-literature-browser-login.mjs --url <article>   # 为指定文章页
 node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状态
 ```
 
+> **手动 PDF 剪切入库**：登录墙/限流时，用户在浏览器里手动下载论文 PDF 到 `~/Downloads`，再把路径告诉 agent；agent 调用 `literature_fetch_pdf(pushId, paperId, manualPdfPath=<路径>)` 校验后**剪切**进知识库（源文件不再残留）。详见 [Human-in-the-loop](#human-in-the-loop)。
+
 ### 每篇候选的全文获取顺序
 
 ```
@@ -92,6 +95,8 @@ Rank #1 → 质量门通过？→ public/OA 链（arXiv / OpenAlex OA / Unpaywal
   └─ 不可得 → publisher_browser（DOI 直连 → 出版社文章页 → PDF）
        ├─ PDF_OK → SELECTED
        ├─ AUTH_REQUIRED（登录墙）→ HITL 停驻，绝不跳过高质量 Rank#1 去选低质量 OA Rank#2
+       │    └─ 用户登录（browser-login）或自行下载 PDF
+       │         → literature_fetch_pdf(manualPdfPath) 剪切入库（move）→ SELECTED
        ├─ ACCESS_DENIED（403 / 无订阅）→ 下一排名候选
        └─ PDF_NOT_FOUND → 下一排名候选
 然后 Rank #2、#3…… — 一旦 SELECTED 立即停止后续获取（每推送 ≤ 1 篇）
@@ -134,6 +139,20 @@ node bin/dsh-literature-push.mjs --resume <pushId>
 
 登录会清除全部限流时间戳，同一论文可立即重试。若登录成功但机构无订阅权限，provider 报告 `ACCESS_DENIED`，管线继续下一排名候选。
 
+手动下载流程（自动浏览器仍无法获取 PDF 时的首选路径）：
+
+```sh
+# 1. 推送停驻期间（AUTH_REQUIRED / RATE_LIMITED 等），你在 headed 浏览器
+#    中自行下载文章 PDF → 保存到 ~/Downloads
+# 2. 把文件路径交给 agent（如「已下载到 ~/Downloads/xxx.pdf」），
+#    它调用 literature_fetch_pdf(pushId, paperId, manualPdfPath=<路径>)
+# 3. PDF 经校验（%PDF- / 大小 / sha256）后**剪切（move）**进知识库
+#    pdfs/<sha256>.pdf —— ~/Downloads 副本随即移除，不留重复文件
+# 4. 恢复后照常进入全文索引 + 精读 + 报告
+```
+
+手动登记的 PDF 记录为 `access_type=manual`、`is_open_access=0`（私人、非 OA 获取），其溯源（原路径、sha256、moved 标志）保留在 `fetch_log`。
+
 ## 运行时数据
 
 ```
@@ -157,7 +176,7 @@ pnpm test        # vitest
 
 ## 测试
 
-Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（RATE_LIMITED）、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF-/大小/sha256 校验、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + DB v15 acquisition state / policy snapshot）、lossless-JSON 输出边界。
+Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（RATE_LIMITED）、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF-/大小/sha256 校验、手动 PDF 剪切入库（源文件移入知识库）、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + DB v15 acquisition state / policy snapshot）、lossless-JSON 输出边界。
 
 ## 当前状态
 

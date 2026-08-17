@@ -161,7 +161,7 @@ interface SourceAdapter {
 - **触发**：资源访问/认证/权限/下载渠道/研究选择问题且用户比自动化更容易解决时——不盲目重试、不直接判失败。典型：CARSI 失效、出版社需人工登录、PDF 需人工确认入口、经典论文无公开全文但可能有机构访问、多版本无法判断、候选质量不足需调整主题/阶段。
 - **状态机（DB v8）**：`pushes.status` 增加 `user_action_required`（CHECK 扩展，表重建）；新表 `user_actions`（step/kind/state open|resolved/issue/attempts/what_user_should_do/how_to_continue）。open 时 push 置 `user_action_required`（errorCode=NEED_USER_ACTION）；全部 resolve 后自动回 `running`。**record 强制校验**：`user_action_required` 必须有 open 待办；`errorCode=AUTH_REQUIRED` 只允许 `auth_required`/`user_action_required`——**禁止把 AUTH_REQUIRED / USER_RESOURCE_NEEDED 误记为 FULLTEXT_UNAVAILABLE**。
 - **恢复**：`literature_resume(pushId)` 只读汇报卡点/待办（五要素）+ `resumeFrom`（sources/selection/fetch_pdf/fulltext_index/report/record，纯函数 `inferResumeFrom` 推断）。候选、评分、selection 轨迹、fetch_log 全部持久化——**恢复不重新检索、不重新评分**；唯一例外是用户自己决定调整主题（kind=topic_decision → sources，属用户驱动的重检索而非盲目重试）。
-- **用户渠道**：`bin/dsh-literature-actions.mjs list|resolve`（五要素 CLI）；`dsh-literature-carsi-login` 成功后自动 resolve 所有 `carsi_relogin` 待办；`bin/dsh-literature-push.mjs --resume <pushId>` 恢复 headless 推送。手动下载的 PDF 经 `literature_fetch_pdf(manualPdfPath)` 登记（校验 + sha256，source=manual，非 OA）。
+- **用户渠道**：`bin/dsh-literature-actions.mjs list|resolve`（五要素 CLI）；`dsh-literature-carsi-login` 成功后自动 resolve 所有 `carsi_relogin` 待办；`bin/dsh-literature-push.mjs --resume <pushId>` 恢复 headless 推送。手动下载的 PDF 经 `literature_fetch_pdf(manualPdfPath)` 登记（校验 + sha256，source=manual，非 OA）——**剪切语义**：入库后删除用户侧源文件（`~/Downloads` 副本不再残留；rename 优先、跨设备 fallback 复制+删除，失败仅降级并在 reason 中报告）。
 - **修复**：`literature_fulltext_index` 现在接受 `PDF_OK`（CARSI/manual 下载的 PDF 可建全文索引）。
 
 ## 3g. V0.1 correctness 收口（DB v9）

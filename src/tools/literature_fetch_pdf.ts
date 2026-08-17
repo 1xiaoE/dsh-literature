@@ -12,8 +12,8 @@
  * FULLTEXT_UNAVAILABLE. The full attempt trail is persisted.
  */
 import { createHash } from 'node:crypto'
-import { copyFileSync, mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { copyFileSync, mkdirSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { jsonSafe } from '../lib/json_safe.js'
@@ -302,6 +302,12 @@ const PDF_MAGIC = Buffer.from('%PDF-')
  * Register a user-provided PDF (HITL manual download): validate %PDF- magic +
  * minimum size, store as pdfs/<sha256>.pdf with provenance source=manual and
  * is_open_access=0 (a private, non-OA acquisition).
+ *
+ * The manual file is MOVED (剪切) into the library rather than copied: the
+ * user's ~/Downloads copy is removed after a successful import, so the
+ * original is never left behind as a duplicate. If the move fails for any
+ * reason (permissions / cross-device without fallback), the PDF is still
+ * imported and the leftover source path is reported in the reason.
  */
 function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: string): FetchPdfOutput {
   const minBytes = rt.cfg.http.minPdfBytes
@@ -335,7 +341,29 @@ function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: s
   const sha256 = createHash('sha256').update(buf).digest('hex')
   const pdfPath = join(rt.pdfsDir, `${sha256}.pdf`)
   mkdirSync(rt.pdfsDir, { recursive: true })
-  copyFileSync(manualPath, pdfPath)
+  // 剪切语义：先入库，再删除用户侧源文件（如 ~/Downloads 中的下载副本）。
+  let moved = false
+  let leftoverNote = ''
+  if (resolve(manualPath) === resolve(pdfPath)) {
+    // 源路径与库内目标一致（罕见）：无需复制或移动，直接视为已入库。
+    moved = true
+    leftoverNote = '源文件已位于库内，无需移动'
+  } else {
+    try {
+      renameSync(manualPath, pdfPath)
+      moved = true
+    } catch (err) {
+      // 跨设备（EXDEV）等场景 rename 失败 → 复制 + 尽力删除源文件。
+      copyFileSync(manualPath, pdfPath)
+      try {
+        unlinkSync(manualPath)
+        moved = true
+      } catch (err2) {
+        moved = false
+        leftoverNote = `；源文件未能删除（保留于 ${manualPath}）`
+      }
+    }
+  }
   const pdfSource = `manual: ${manualPath}`
   rt.db
     .prepare(
@@ -344,7 +372,7 @@ function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: s
     )
     .run(
       paperId,
-      JSON.stringify([{ source: 'manual', url: manualPath, status: 'ok' }]),
+      JSON.stringify([{ source: 'manual', url: manualPath, status: 'ok', moved }]),
       pdfPath,
       pdfSource,
       sha256,
@@ -357,7 +385,7 @@ function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: s
     pdfSource,
     accessType: 'manual',
     isOpenAccess: false,
-    attempts: [{ source: 'manual', url: manualPath, status: 'ok' }],
-    reason: '用户手动下载的 PDF 已登记（source=manual，非 OA，仅私人文献库）',
+    attempts: [{ source: 'manual', url: manualPath, status: 'ok', moved }],
+    reason: `用户手动下载的 PDF 已登记并剪切入库（source=manual，非 OA，仅私人文献库）${leftoverNote}`,
   }
 }
