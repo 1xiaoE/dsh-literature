@@ -26,7 +26,7 @@ import {
   type StageRelevanceResult,
 } from '../lib/ranking.js'
 import { currentYear, type TopicDef } from '../config.js'
-import { seenPaperIds, startPush } from '../lib/history.js'
+import { seenPaperIds, attemptedPaperIds, startPush } from '../lib/history.js'
 import { ensureStage, getStage, stageLabel, stageDef } from '../lib/stages.js'
 import { planQueries, resolveTopic, applyNegativeFilter, landmarkEligibility, matchSeed, decidePriorityGoal } from '../lib/planner.js'
 import type { PaperRef, PlannedQuery } from '../sources/types.js'
@@ -336,6 +336,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       ])
 
       const seen = seenPaperIds(db, topic.id)
+      const attempted = attemptedPaperIds(db, topic.id)
       const now = currentYear()
       let offTopicDropped = 0
 
@@ -388,6 +389,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
         const id = canonicalId(paper)
         upsertPaper(db, paperToRow(paper))
         const isSeen = seen.has(id)
+        const isAttempted = attempted.has(id)
         const text = `${paper.title} ${paper.abstract ?? ''}`
         const sr = def
           ? stageRelevanceHint(text, def)
@@ -424,6 +426,8 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
             stageRelevance: sr.score,
             knowledgeGap: uncoveredGoals.length > 0 ? gap.score / uncoveredGoals.length : 0,
             priorityGoalMatch: pgMatch.score,
+            isSeen,
+            attempted: isAttempted,
           },
           cfg,
           { topicText: topic.canonicalQueries.join(' '), currentYear: now },
@@ -454,9 +458,15 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
       rows.sort((a, b) => b.pre.score - a.pre.score)
       const tRankingEnd = performance.now()
 
-      const topN = rows.slice(0, Math.max(1, cfg.preRankTopN))
+      // Exploration-first Top-N: already-read papers (isSeen) are excluded from
+      // the ranked shortlist entirely — the exploration decay pushed them down,
+      // and dropping them here guarantees a push recommends fresh material
+      // instead of re-surfacing what the user already consumed.
+      const unseen = rows.filter((r) => !r.isSeen)
+      const rankedPool = unseen.length > 0 ? unseen : rows // safety: never empty even if everything was seen
+      const topN = rankedPool.slice(0, Math.max(1, cfg.preRankTopN))
       for (let i = 0; i < topN.length; i += 1) {
-        const { paper, pool, pre, sr, pgMatch, isSeen } = topN[i]!
+        const { paper, pool: candPool, pre, sr, pgMatch, isSeen } = topN[i]!
         insertCandidate.run(
           pushId,
           canonicalId(paper),
@@ -467,7 +477,7 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
           pre.fulltextAvailable ? 1 : 0,
           sr.score,
           pgMatch,
-          pool,
+          candPool,
           isSeen ? 1 : 0,
         )
       }

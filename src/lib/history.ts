@@ -17,6 +17,33 @@ export function seenPaperIds(db: Db, topic: string): Set<string> {
   return new Set(rows.map((r) => r.paper_id))
 }
 
+/**
+ * ids of papers already ATTEMPTED in past acquisition loops (per topic).
+ * "Attempted" = any earlier push for this topic performed a real PDF
+ * acquisition on the paper — it has a fetch_log row or a persisted
+ * acquisition outcome (PDF_NOT_FOUND / AUTH_REQUIRED / RATE_LIMITED /
+ * FULLTEXT_UNAVAILABLE / ACCESS_DENIED / SELECTED). Such papers must not keep
+ * dominating every recommendation; the ranking applies exploration decay so
+ * fresh, never-seen candidates surface first.
+ */
+export function attemptedPaperIds(db: Db, topic: string): Set<string> {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT paper_id FROM (
+         SELECT f.paper_id FROM fetch_log f
+         JOIN candidates c ON c.paper_id = f.paper_id
+         JOIN pushes p ON p.id = c.push_id
+         WHERE p.topic = ?
+         UNION
+         SELECT c.paper_id FROM candidates c
+         JOIN pushes p ON p.id = c.push_id
+         WHERE p.topic = ? AND c.acquisition_outcome IS NOT NULL
+       )`,
+    )
+    .all(topic, topic) as Array<{ paper_id: string }>
+  return new Set(rows.map((r) => r.paper_id))
+}
+
 /** number of completed picks for a topic (for provenance in reports). */
 export function completedPushCount(db: Db, topic: string): number {
   const row = db

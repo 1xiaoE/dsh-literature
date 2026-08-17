@@ -20,6 +20,10 @@ export interface PreRankInput {
   knowledgeGap?: number
   /** priority knowledge goal match strength (0..1), from priorityGoalMatchScore */
   priorityGoalMatch?: number
+  /** paper was picked/completed in a past push (already read) */
+  isSeen?: boolean
+  /** paper was already attempted in a past push's acquisition (fetch_log / outcome) */
+  attempted?: boolean
 }
 
 export interface PreRankContext {
@@ -118,6 +122,17 @@ export function preRank(
     // stage-excluded papers are heavily penalized in the deterministic order
     score *= 0.6
   }
+  // Exploration decay: papers the user has already seen (picked/completed) or
+  // already attempted in past acquisition loops should NOT keep surfacing at
+  // the top of every push — otherwise the same "hard" papers (paywalled /
+  // no-fulltext) get re-recommended forever. Fresh, never-seen papers win.
+  // - isSeen (already read): strong decay → sinks to the bottom
+  // - attempted (tried, e.g. FULLTEXT_UNAVAILABLE / AUTH_REQUIRED): mild decay
+  //   → still visible but below never-seen candidates
+  // AUTH_REQUIRED / RATE_LIMITED are *temporary*; the mild attempted decay
+  // keeps them reachable for a post-login resume without dominating ranking.
+  if (input.isSeen) score *= 0.1
+  else if (input.attempted) score *= 0.35
   return {
     recencyScore: recency,
     impactScore: impact,

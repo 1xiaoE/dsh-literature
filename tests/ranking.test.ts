@@ -55,6 +55,22 @@ describe('ranking', () => {
     expect(zero.score).toBe(0)
   })
 
+  it('exploration decay: seen/attempted papers rank below never-seen ones', () => {
+    const cfg = defaultConfig()
+    const now = currentYear()
+    const ctx = { topicText: 'legged robot locomotion control quadruped', currentYear: now }
+    const base = { title: 'Legged Robot Contact Force Control', year: now, citations: 500, fulltextAvailable: true }
+    const fresh = preRank({ ...base }, cfg, ctx)
+    const attempted = preRank({ ...base, attempted: true }, cfg, ctx)
+    const seen = preRank({ ...base, isSeen: true }, cfg, ctx)
+    // fresh > attempted > seen — the exploration order a push should follow
+    expect(fresh.score).toBeGreaterThan(attempted.score)
+    expect(attempted.score).toBeGreaterThan(seen.score)
+    // decay magnitudes: seen ≈ 0.1×, attempted ≈ 0.35× of the fresh score
+    expect(seen.score).toBeCloseTo(fresh.score * 0.1, 5)
+    expect(attempted.score).toBeCloseTo(fresh.score * 0.35, 5)
+  })
+
   it('agent final score is weighted', () => {
     const cfg = defaultConfig()
     const s = agentFinalScore(
