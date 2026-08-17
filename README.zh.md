@@ -11,10 +11,13 @@
 - **多源检索** — arXiv / OpenAlex / Crossref / Unpaywall；RecentPool + LandmarkPool（支持 curated seeds）
 - **两阶段排序** — 确定性预排序（Top 15）→ 一次性批量 agent 语义排序，带 stage-relevance 与 curriculum-value 硬门槛
 - **知识缺口引导** — priority knowledge goal 加权；`requiredGoals` 阶段毕业门（仅凭论文数量不能毕业）
-- **全文验证阅读** — 合法 PDF 回退链、%PDF- 魔数/大小/sha256 校验、分块 token 安全阅读、阅读覆盖率溯源
-- **完整 SQLite 溯源** — 论文、评分轨迹、抓取日志、检索记录、各阶段耗时、阶段、用户待办
+- **Quality First, Access Second** — 论文先按学术质量排序；全文获取在排序后逐篇进行，绝不覆盖质量（OA 可得性不提高学术质量）
+- **Direct Publisher Access** — 通用 `publisher_browser` provider：DOI 直连 → 出版社文章页 → PDF；登录墙将推送停驻为 `AUTH_REQUIRED`（HITL），绝不伪装失败
+- **per-domain 限流** — 按出版社域名限流（IEEE 永不阻塞 Springer）；人工登录即清除限流，resume 可立即重试同一论文
+- **全文验证阅读** — 合法 PDF 回退链、%PDF- 魔数/大小/sha256 校验、分块 token 安全阅读、阅读覆盖率溯源（`total_chunks / read_chunks / read_coverage / coverage_basis`）
+- **完整 SQLite 溯源** — 论文、评分轨迹、抓取日志（access_type: `oa` / `institutional` / `manual`、`is_open_access`）、检索记录、各阶段耗时、阶段、用户待办
 - **Human-in-the-loop** — 五要素用户待办、从原步骤恢复、0-LLM 确定性收口
-- **headless 优先** — cron 友好 CLI；机构访问通过通用 publisher browser（**Quality First, Access Second**；机构授权 ≠ 开放获取；legacy CARSI 默认禁用）
+- **headless 优先** — cron 友好 CLI（机构授权 ≠ 开放获取；legacy CARSI 默认禁用）
 
 ## 架构
 
@@ -46,7 +49,16 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 
 ## 配置
 
-完整配置 schema 见 `cordis.patch.yml` 与 `DESIGN.md`（主题、阶段、知识目标、权重、阈值、`publisherBrowser` / legacy `carsi` 块）。
+完整配置 schema 见 `cordis.patch.yml` 与 `DESIGN.md`（主题、阶段、知识目标、排序权重、阈值、`publisherBrowser` 块、legacy `carsi` 块）。
+
+关键旋钮：
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `publisherBrowser.enabled` | `true` | 通用出版社浏览器机构访问总开关 |
+| `publisherBrowser.minIntervalMinutes` | `2` | 按出版社域名限流（IEEE ≠ Springer）；登录后清除，resume 立即重试 |
+| `carsi.enabled` | `false` | LEGACY CARSI 门户导航 — 仅供历史/测试 |
+| `ranking.fulltextAvailability` | `0.03` | OA 可得性仅是获取成本提示，绝非质量信号 |
 
 ### OpenAlex API key（可选但推荐）
 
@@ -63,7 +75,21 @@ node bin/dsh-literature-push.mjs --topic "足式机器人控制"   # 一次完�
 node bin/dsh-literature-push.mjs --resume <pushId>          # 恢复（可确定性时 0-LLM）
 node bin/dsh-literature-actions.mjs list | resolve <id>     # Human-in-the-loop 待办
 node bin/dsh-literature-browser-login.mjs --push <pushId>   # 出版社登录墙（HITL）
+node bin/dsh-literature-browser-login.mjs --url <article>   # 为指定文章页登录
 node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状态
+```
+
+### 每篇候选的全文获取顺序
+
+```
+Rank #1 → 质量门通过？→ public/OA 链（arXiv / OpenAlex OA / Unpaywall / 出版社公开 PDF）
+  ├─ 可得 → SELECTED
+  └─ 不可得 → publisher_browser（DOI 直连 → 出版社文章页 → PDF）
+       ├─ PDF_OK → SELECTED
+       ├─ AUTH_REQUIRED（登录墙）→ HITL 停驻，绝不跳过高质量 Rank#1 去选低质量 OA Rank#2
+       ├─ ACCESS_DENIED（403 / 无订阅）→ 下一排名候选
+       └─ PDF_NOT_FOUND → 下一排名候选
+然后 Rank #2、#3…… — 一旦 SELECTED 立即停止后续获取（每推送 ≤ 1 篇）
 ```
 
 ## 课程（Curriculum）
@@ -78,7 +104,6 @@ node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状
 | OpenAlex | 元数据 / 引用 / OA 位置（环境变量 API key） |
 | Crossref | DOI 元数据 + 出版社链接 |
 | Unpaywall | 合法 OA 位置 |
-| Unpaywall | 合法 OA 位置 |
 | publisher_browser（默认） | 机构访问：通用出版社浏览器直连 — **Quality First, Access Second**，**≠ 开放获取**，仅私人文献库 |
 | CARSI（legacy，默认关闭） | 保留历史/测试；需在 `carsi.enabled` 显式开启 |
 
@@ -90,6 +115,20 @@ node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状
 
 资源/认证/权限类问题将推送停驻为五要素待办（卡在哪步 / 缺什么 / 试过什么 / 用户做什么 / 如何继续），绝不把 `AUTH_REQUIRED` 误记为 `FULLTEXT_UNAVAILABLE`；用户处理后从原步骤恢复——复用已持久化的候选、评分与抓取日志。
 
+登录流程：
+
+```sh
+# 1. 推送因 AUTH_REQUIRED 停驻（kind=publisher_login）
+node bin/dsh-literature-actions.mjs list          # 查看五要素待办
+# 2. 用同一持久 profile 的 headed 浏览器打开文章页
+node bin/dsh-literature-browser-login.mjs --push <pushId>
+#    （自行完成合法登录——工具绝不代填凭据）
+# 3. 从原步骤恢复，不重新检索 / 不重新排序
+node bin/dsh-literature-push.mjs --resume <pushId>
+```
+
+登录会清除全部限流时间戳，同一论文可立即重试。若登录成功但机构无订阅权限，provider 报告 `ACCESS_DENIED`，管线继续下一排名候选。
+
 ## 运行时数据
 
 ```
@@ -98,7 +137,9 @@ node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状
 ├── pdfs/<sha256>.pdf  # 内容哈希存储
 ├── cache/             # 适配器缓存
 ├── reports/           # canonical 精读报告
-└── browser-profile/   # 专用出版社浏览器（绝不使用日常浏览器）
+├── browser-profile/   # 专用出版社浏览器（绝不使用日常浏览器）
+├── publisher_browser/ # per-domain 限流 ledger
+└── carsi/             # legacy CARSI ledger（默认禁用）
 ```
 
 ## 开发
@@ -111,11 +152,11 @@ pnpm test        # vitest
 
 ## 测试
 
-PDF 回退链、分块、排序、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化）、lossless-JSON 输出边界。
+PDF 回退链、per-domain 限流、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF-/大小/sha256 校验、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + v13→v14 manual provenance）、lossless-JSON 输出边界。
 
 ## 当前状态
 
-**V0.1** — 稳定；工作流/插件源码仓库，非独立应用。
+**V0.1** — 稳定；工作流/插件源码仓库，非独立应用。已在真实非 OA 论文上端到端 smoke test（IEEE T-RO 经机构/手动登录获取；出版社登录墙 HITL 流程已验证）。
 
 ## Roadmap
 

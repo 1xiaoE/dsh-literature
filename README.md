@@ -11,10 +11,13 @@ This is a **pure plugin / workflow source repository**: no personal reading libr
 - **Multi-source retrieval** — arXiv, OpenAlex, Crossref, Unpaywall; RecentPool + LandmarkPool with curated seeds
 - **Two-stage ranking** — deterministic pre-ranking (Top 15) → one-shot batch agent semantic ranking, with stage-relevance and curriculum-value gates
 - **Knowledge-gap guidance** — priority knowledge goal weighting; `requiredGoals` stage gate (a stage never graduates by paper count alone)
-- **Verified full-text** — legal PDF fallback chain, %PDF- magic / size / sha256 validation, chunked token-safe reading, reading-coverage provenance
-- **Full SQLite provenance** — papers, scoring traces, fetch log, retrievals, per-phase timings, stages, user actions
+- **Quality First, Access Second** — papers are ranked on academic merit; fulltext acquisition happens rank-by-rank afterwards and never overrides quality (OA availability does not raise academic quality)
+- **Direct Publisher Access** — generic `publisher_browser` provider: DOI direct resolution → publisher article page → PDF; login walls park the push as `AUTH_REQUIRED` (HITL), never a fake failure
+- **Per-domain rate limit** — attempts are throttled per publisher host (IEEE never blocks Springer); a manual login clears the gate so resume retries immediately
+- **Verified full-text** — legal PDF fallback chain, %PDF- magic / size / sha256 validation, chunked token-safe reading, reading-coverage provenance (`total_chunks / read_chunks / read_coverage / coverage_basis`)
+- **Full SQLite provenance** — papers, scoring traces, fetch log (access_type: `oa` / `institutional` / `manual`, `is_open_access`), retrievals, per-phase timings, stages, user actions
 - **Human-in-the-loop** — five-part user-action records, resume from the original step, 0-LLM deterministic finalize
-- **Headless-first** — cron-friendly CLI; institutional access via a generic publisher browser (Quality First, Access Second; institutional access ≠ open access; legacy CARSI off by default)
+- **Headless-first** — cron-friendly CLI (institutional access ≠ open access; legacy CARSI off by default)
 
 ## Architecture
 
@@ -46,7 +49,16 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 
 ## Configuration
 
-See `cordis.patch.yml` and `DESIGN.md` for the full schema (topics, stages, goals, weights, thresholds, `carsi` block).
+See `cordis.patch.yml` and `DESIGN.md` for the full schema (topics, stages, goals, ranking weights, thresholds, `publisherBrowser` block, legacy `carsi` block).
+
+Key knobs:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `publisherBrowser.enabled` | `true` | master switch for the generic publisher-browser institutional access |
+| `publisherBrowser.minIntervalMinutes` | `2` | per-publisher-domain rate limit (IEEE ≠ Springer); login clears it for immediate resume |
+| `carsi.enabled` | `false` | LEGACY CARSI portal navigation — kept for history/tests only |
+| `ranking.fulltextAvailability` | `0.03` | OA availability is only an acquisition-cost hint, never a quality signal |
 
 ### OpenAlex API key (optional but recommended)
 
@@ -63,7 +75,21 @@ node bin/dsh-literature-push.mjs --topic "足式机器人控制"   # one full pu
 node bin/dsh-literature-push.mjs --resume <pushId>          # resume (0-LLM when possible)
 node bin/dsh-literature-actions.mjs list | resolve <id>     # human-in-the-loop actions
 node bin/dsh-literature-browser-login.mjs --push <pushId>   # publisher login wall (HITL)
+node bin/dsh-literature-browser-login.mjs --url <article>   # login for a specific article page
 node bin/dsh-literature-browser-login.mjs --check           # browser session status
+```
+
+### Full acquisition order (per ranked candidate)
+
+```
+Rank #1 → quality gate pass? → public/OA chain (arXiv / OpenAlex OA / Unpaywall / publisher public PDF)
+  ├─ available → SELECTED
+  └─ unavailable → publisher_browser (DOI direct → publisher article page → PDF)
+       ├─ PDF_OK → SELECTED
+       ├─ AUTH_REQUIRED (login wall) → HITL park, NEVER skip to a lower-quality OA Rank #2
+       ├─ ACCESS_DENIED (403 / not entitled) → next ranked candidate
+       └─ PDF_NOT_FOUND → next ranked candidate
+Then Rank #2, #3, ... — once SELECTED, all further acquisition stops (≤ 1 per push)
 ```
 
 ## Curriculum
@@ -78,7 +104,6 @@ Stages define scope, keywords, knowledge goals, `requiredGoals`, and curated lan
 | OpenAlex | metadata / citations / OA locations (env API key) |
 | Crossref | DOI metadata + publisher links |
 | Unpaywall | legal-OA locations |
-| Unpaywall | legal-OA locations |
 | publisher_browser (default) | institutional access via direct publisher browser — **Quality First, Access Second**, **≠ open access**, private library only |
 | CARSI (legacy, off by default) | kept for history/tests; re-enable deliberately via `carsi.enabled` |
 
@@ -90,6 +115,20 @@ Stages define scope, keywords, knowledge goals, `requiredGoals`, and curated lan
 
 Resource/auth/permission problems park the push with a five-part record (where / what's missing / what was tried / what to do / how to continue), never misreport `AUTH_REQUIRED` as `FULLTEXT_UNAVAILABLE`, and resume from the original step — reusing persisted candidates, scores, and fetch log.
 
+Login flow:
+
+```sh
+# 1. the push parks with AUTH_REQUIRED (kind=publisher_login)
+node bin/dsh-literature-actions.mjs list          # see the five-part record
+# 2. open the article in a headed browser with the SAME persistent profile
+node bin/dsh-literature-browser-login.mjs --push <pushId>
+#    (complete a legal login yourself — the tool never fills credentials)
+# 3. resume from the exact step, no re-retrieval / re-ranking
+node bin/dsh-literature-push.mjs --resume <pushId>
+```
+
+The login clears all rate-limit timestamps, so the same paper can be retried immediately. If the login succeeds but the institution is not entitled, the provider reports `ACCESS_DENIED` and the pipeline moves to the next ranked candidate.
+
 ## Runtime Data
 
 ```
@@ -98,7 +137,9 @@ Resource/auth/permission problems park the push with a five-part record (where /
 ├── pdfs/<sha256>.pdf  # content-hashed downloads
 ├── cache/             # adapter caches
 ├── reports/           # canonical reading reports
-└── browser-profile/   # dedicated publisher browser (never your daily browser)
+├── browser-profile/   # dedicated publisher browser (never your daily browser)
+├── publisher_browser/ # per-domain rate-limit ledger
+└── carsi/             # legacy CARSI ledger (disabled by default)
 ```
 
 ## Development
@@ -111,11 +152,11 @@ pnpm test        # vitest
 
 ## Tests
 
-PDF fallback chains, chunking, ranking, stage/graduation gates, priority-goal matching, HITL + resume, report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init), lossless-JSON output boundary.
+PDF fallback chains, per-domain rate limiting, publisher-browser login-wall classification (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND), %PDF- / size / sha256 validation, institutional/manual provenance (`is_open_access=false`), chunking, ranking (OA decoupled from quality), stage/graduation gates, priority-goal matching, HITL + resume (no re-retrieval/re-ranking), report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init + v13→v14 manual provenance), lossless-JSON output boundary.
 
 ## Current Status
 
-**V0.1** — stable; a workflow/plugin source repository, not a standalone application.
+**V0.1** — stable; a workflow/plugin source repository, not a standalone application. Smoke-tested end-to-end on real non-OA papers (IEEE T-RO via manual/institutional login; publisher login-wall HITL flow verified).
 
 ## Roadmap
 
