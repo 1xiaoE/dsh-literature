@@ -12,6 +12,7 @@
 - **两阶段排序** — 确定性预排序（Top 15）→ 一次性批量 agent 语义排序，带 stage-relevance 与 curriculum-value 硬门槛
 - **知识缺口引导** — priority knowledge goal 加权；`requiredGoals` 阶段毕业门（仅凭论文数量不能毕业）
 - **Quality First, Access Second** — 论文先按学术质量排序；全文获取在排序后逐篇进行，绝不覆盖质量（OA 可得性不提高学术质量）
+- **探索优先推荐** — 已读论文从候选短名单排除；尝试过但失败的论文降权（×0.35），每次推送优先展示新材料，避免永远重复推荐同一批"难啃"论文
 - **Direct Publisher Access** — 通用 `publisher_browser` provider：DOI 直连 → 出版社文章页 → PDF；登录墙将推送停驻为 `AUTH_REQUIRED`（HITL），绝不伪装失败
 - **per-domain 限流** — 按出版社域名限流（IEEE 永不阻塞 Springer）；人工登录即清除限流，resume 可立即重试同一论文
 - **全文验证阅读** — 合法 PDF 回退链、%PDF- 魔数/大小/sha256 校验、分块 token 安全阅读、阅读覆盖率溯源（`total_chunks / read_chunks / read_coverage / coverage_basis`）

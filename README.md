@@ -12,6 +12,7 @@ This is a **pure plugin / workflow source repository**: no personal reading libr
 - **Two-stage ranking** — deterministic pre-ranking (Top 15) → one-shot batch agent semantic ranking, with stage-relevance and curriculum-value gates
 - **Knowledge-gap guidance** — priority knowledge goal weighting; `requiredGoals` stage gate (a stage never graduates by paper count alone)
 - **Quality First, Access Second** — papers are ranked on academic merit; fulltext acquisition happens rank-by-rank afterwards and never overrides quality (OA availability does not raise academic quality)
+- **Exploration-first recommendation** — already-read papers are excluded from the shortlist and attempted-but-failed ones are decayed (×0.35), so each push surfaces fresh material instead of re-recommending the same "hard" papers forever
 - **Direct Publisher Access** — generic `publisher_browser` provider: DOI direct resolution → publisher article page → PDF; login walls park the push as `AUTH_REQUIRED` (HITL), never a fake failure
 - **Per-domain rate limit** — attempts are throttled per publisher host (IEEE never blocks Springer); a manual login clears the gate so resume retries immediately
 - **Verified full-text** — legal PDF fallback chain, %PDF- magic / size / sha256 validation, chunked token-safe reading, reading-coverage provenance (`total_chunks / read_chunks / read_coverage / coverage_basis`)
