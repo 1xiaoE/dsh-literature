@@ -14,7 +14,7 @@ This is a **pure plugin / workflow source repository**: no personal reading libr
 - **Verified full-text** — legal PDF fallback chain, %PDF- magic / size / sha256 validation, chunked token-safe reading, reading-coverage provenance
 - **Full SQLite provenance** — papers, scoring traces, fetch log, retrievals, per-phase timings, stages, user actions
 - **Human-in-the-loop** — five-part user-action records, resume from the original step, 0-LLM deterministic finalize
-- **Headless-first** — cron-friendly CLI; optional CARSI institutional fallback (institutional access ≠ open access)
+- **Headless-first** — cron-friendly CLI; institutional access via a generic publisher browser (Quality First, Access Second; institutional access ≠ open access; legacy CARSI off by default)
 
 ## Architecture
 
@@ -33,7 +33,7 @@ topic → search (Recent + Landmark) → dedupe → pre-rank (Top 15)
 
 - Node.js >= 22.19, pnpm, `pdftotext` (poppler-utils)
 - A DeepSeek Harness checkout (external, not bundled)
-- Optional: `playwright` + Chromium for CARSI
+- Optional: `playwright` + Chromium for the publisher-browser institutional access (and the legacy CARSI path)
 
 ## Installation
 
@@ -62,7 +62,8 @@ Read from the environment only — never stored in source, logs, SQLite, or Git.
 node bin/dsh-literature-push.mjs --topic "足式机器人控制"   # one full push
 node bin/dsh-literature-push.mjs --resume <pushId>          # resume (0-LLM when possible)
 node bin/dsh-literature-actions.mjs list | resolve <id>     # human-in-the-loop actions
-node bin/dsh-literature-carsi-login.mjs                     # optional CARSI login
+node bin/dsh-literature-browser-login.mjs --push <pushId>   # publisher login wall (HITL)
+node bin/dsh-literature-browser-login.mjs --check           # browser session status
 ```
 
 ## Curriculum
@@ -77,11 +78,13 @@ Stages define scope, keywords, knowledge goals, `requiredGoals`, and curated lan
 | OpenAlex | metadata / citations / OA locations (env API key) |
 | Crossref | DOI metadata + publisher links |
 | Unpaywall | legal-OA locations |
-| CARSI (optional) | institutional full-text fallback — **≠ open access**, private library only |
+| Unpaywall | legal-OA locations |
+| publisher_browser (default) | institutional access via direct publisher browser — **Quality First, Access Second**, **≠ open access**, private library only |
+| CARSI (legacy, off by default) | kept for history/tests; re-enable deliberately via `carsi.enabled` |
 
 ## Full-text Handling
 
-Order: arXiv/OA → Unpaywall → publisher links → (optional) CARSI → `FULLTEXT_UNAVAILABLE`. Every download is validated (HTTP / Content-Type / %PDF- magic / non-HTML / size / sha256); text is chunked and read token-safely; `total_chunks / read_chunks / read_coverage / coverage_basis` are recorded per push.
+**Quality First, Access Second**: papers are ranked on academic merit (topic / stage / curriculum / venue / learning value / knowledge gap); fulltext acquisition happens rank-by-rank afterwards and never overrides quality. Order per candidate: arXiv/OA → Unpaywall → publisher links → publisher_browser (DOI direct resolution → publisher article page → PDF) → `FULLTEXT_UNAVAILABLE`. A login wall parks the push as `AUTH_REQUIRED` (HITL: `bin/dsh-literature-browser-login`), not a fake failure. Every download is validated (HTTP / Content-Type / %PDF- magic / non-HTML / size / sha256); text is chunked and read token-safely; `total_chunks / read_chunks / read_coverage / coverage_basis` are recorded per push.
 
 ## Human-in-the-loop
 
@@ -95,7 +98,7 @@ Resource/auth/permission problems park the push with a five-part record (where /
 ├── pdfs/<sha256>.pdf  # content-hashed downloads
 ├── cache/             # adapter caches
 ├── reports/           # canonical reading reports
-└── browser-profile/   # CARSI browser (never your daily browser)
+└── browser-profile/   # dedicated publisher browser (never your daily browser)
 ```
 
 ## Development

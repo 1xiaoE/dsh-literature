@@ -14,7 +14,7 @@
 - **全文验证阅读** — 合法 PDF 回退链、%PDF- 魔数/大小/sha256 校验、分块 token 安全阅读、阅读覆盖率溯源
 - **完整 SQLite 溯源** — 论文、评分轨迹、抓取日志、检索记录、各阶段耗时、阶段、用户待办
 - **Human-in-the-loop** — 五要素用户待办、从原步骤恢复、0-LLM 确定性收口
-- **headless 优先** — cron 友好 CLI；可选 CARSI 机构授权兜底（**机构授权 ≠ 开放获取**）
+- **headless 优先** — cron 友好 CLI；机构访问通过通用 publisher browser（**Quality First, Access Second**；机构授权 ≠ 开放获取；legacy CARSI 默认禁用）
 
 ## 架构
 
@@ -33,7 +33,7 @@ topic → 检索（Recent + Landmark）→ 去重 → 预排序（Top 15）
 
 - Node.js >= 22.19、pnpm、`pdftotext`（poppler-utils）
 - DeepSeek Harness checkout（外部依赖，不随本仓库分发）
-- 可选：CARSI 兜底需要 `playwright` + Chromium
+- 可选：机构访问（publisher_browser / legacy CARSI）需要 `playwright` + Chromium
 
 ## 安装
 
@@ -46,7 +46,7 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 
 ## 配置
 
-完整配置 schema 见 `cordis.patch.yml` 与 `DESIGN.md`（主题、阶段、知识目标、权重、阈值、`carsi` 块）。
+完整配置 schema 见 `cordis.patch.yml` 与 `DESIGN.md`（主题、阶段、知识目标、权重、阈值、`publisherBrowser` / legacy `carsi` 块）。
 
 ### OpenAlex API key（可选但推荐）
 
@@ -62,7 +62,8 @@ export OPENALEX_API_KEY='YOUR_KEY'
 node bin/dsh-literature-push.mjs --topic "足式机器人控制"   # 一次完整推送
 node bin/dsh-literature-push.mjs --resume <pushId>          # 恢复（可确定性时 0-LLM）
 node bin/dsh-literature-actions.mjs list | resolve <id>     # Human-in-the-loop 待办
-node bin/dsh-literature-carsi-login.mjs                     # 可选 CARSI 登录
+node bin/dsh-literature-browser-login.mjs --push <pushId>   # 出版社登录墙（HITL）
+node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状态
 ```
 
 ## 课程（Curriculum）
@@ -77,11 +78,13 @@ node bin/dsh-literature-carsi-login.mjs                     # 可选 CARSI 登�
 | OpenAlex | 元数据 / 引用 / OA 位置（环境变量 API key） |
 | Crossref | DOI 元数据 + 出版社链接 |
 | Unpaywall | 合法 OA 位置 |
-| CARSI（可选） | 机构授权全文兜底 — **≠ 开放获取**，仅私人文献库 |
+| Unpaywall | 合法 OA 位置 |
+| publisher_browser（默认） | 机构访问：通用出版社浏览器直连 — **Quality First, Access Second**，**≠ 开放获取**，仅私人文献库 |
+| CARSI（legacy，默认关闭） | 保留历史/测试；需在 `carsi.enabled` 显式开启 |
 
 ## 全文处理
 
-顺序：arXiv/OA → Unpaywall → 出版社链接 →（可选）CARSI → `FULLTEXT_UNAVAILABLE`。每次下载均验证（HTTP / Content-Type / %PDF- 魔数 / 非 HTML 登录页 / 大小 / sha256）；文本分块后 token 安全阅读；每次推送记录 `total_chunks / read_chunks / read_coverage / coverage_basis`。
+**Quality First, Access Second**：论文先按学术质量排序（topic / stage / curriculum / venue / learning value / knowledge gap），全文获取在排序后逐篇进行，绝不覆盖质量。每篇候选顺序：arXiv/OA → Unpaywall → 出版社链接 → publisher_browser（DOI 直连 → 出版社文章页 → PDF）→ `FULLTEXT_UNAVAILABLE`。登录墙将推送停驻为 `AUTH_REQUIRED`（HITL：`bin/dsh-literature-browser-login`），绝不伪装失败。每次下载均验证（HTTP / Content-Type / %PDF- 魔数 / 非 HTML 登录页 / 大小 / sha256）；文本分块后 token 安全阅读；每次推送记录 `total_chunks / read_chunks / read_coverage / coverage_basis`。
 
 ## Human-in-the-loop
 
@@ -95,7 +98,7 @@ node bin/dsh-literature-carsi-login.mjs                     # 可选 CARSI 登�
 ├── pdfs/<sha256>.pdf  # 内容哈希存储
 ├── cache/             # 适配器缓存
 ├── reports/           # canonical 精读报告
-└── browser-profile/   # CARSI 浏览器（绝不使用日常浏览器）
+└── browser-profile/   # 专用出版社浏览器（绝不使用日常浏览器）
 ```
 
 ## 开发

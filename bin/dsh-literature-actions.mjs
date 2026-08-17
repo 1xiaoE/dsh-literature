@@ -54,7 +54,7 @@ function dumpAction(a, pushId) {
   console.log(`   用户需要: ${a.what_user_should_do}`)
   console.log(`   如何继续: ${a.how_to_continue}`)
   console.log(`   创建于:   ${a.created_at}${a.resolved_at ? `，解决于 ${a.resolved_at}` : ''}`)
-  if (a.state === 'open' && a.kind !== 'carsi_relogin') {
+  if (a.state === 'open' && a.kind !== 'carsi_relogin' && a.kind !== 'publisher_login') {
     console.log(`   完成:     dsh-literature-actions resolve ${a.id}`)
   }
   console.log('')

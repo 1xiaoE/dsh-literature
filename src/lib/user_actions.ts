@@ -39,7 +39,7 @@ export interface NewUserAction {
   paperId?: string
   /** where the workflow is stuck (sources/selection/preflight/fetch_pdf/fulltext_index/report/record) */
   step: string
-  /** carsi_relogin | manual_pdf | version_choice | topic_decision | user_resource_needed | ... */
+  /** publisher_login | carsi_relogin | manual_pdf | version_choice | topic_decision | user_resource_needed | ... */
   kind: string
   issue: string
   attempts?: string[]

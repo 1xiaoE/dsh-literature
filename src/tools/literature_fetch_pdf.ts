@@ -1,13 +1,15 @@
 /**
  * Tool: literature_fetch_pdf — download a paper's PDF with multi-source
  * fallback: public/OA chain (arxiv → openalex OA → unpaywall → crossref
- * publisher links) first; when the agent explicitly opts in (allowCarsi) and
- * all public sources failed for a quality-gated paper, the CARSI
- * institutional-access provider is consulted as the LAST resort.
+ * publisher links) first; when all public sources failed for a quality-gated
+ * paper, the institutional providers are consulted rank-by-rank:
+ *   - publisher_browser (generic Direct Publisher Access, the default);
+ *   - carsi (LEGACY / EXPERIMENTAL — only when explicitly enabled).
  *
- * Terminals: ok (public) / PDF_OK (CARSI) / AUTH_REQUIRED (session broken —
- * NEVER a paper-level cooldown; user must re-login) / ACCESS_DENIED /
- * PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE. The full attempt trail is persisted.
+ * Terminals: ok (public) / PDF_OK (institutional) / AUTH_REQUIRED (session
+ * broken — NEVER a paper-level cooldown; user must re-login via
+ * bin/dsh-literature-browser-login) / ACCESS_DENIED / PDF_NOT_FOUND /
+ * FULLTEXT_UNAVAILABLE. The full attempt trail is persisted.
  */
 import { createHash } from 'node:crypto'
 import { copyFileSync, mkdirSync, readFileSync } from 'node:fs'
@@ -23,15 +25,22 @@ export interface FetchPdfInput {
   paperId: string
   pushId?: number
   /**
-   * Opt into the institutional-access fallback (CARSI) for this paper.
-   * MUST only be set after (a) the paper passed the ranking quality gates and
-   * (b) every public/open-access fulltext source failed. CARSI is never a
-   * batch/bulk source — strict low-frequency gates apply.
+   * Opt into the institutional-access fallback (publisher_browser and, if
+   * enabled, CARSI) for this paper. MUST only be set after (a) the paper
+   * passed the ranking quality gates and (b) every public/open-access
+   * fulltext source failed. Institutional access is never a batch/bulk
+   * source — strict low-frequency gates apply.
+   */
+  allowInstitutional?: boolean
+  /**
+   * Backward-compatible alias of allowInstitutional (kept so old prompts and
+   * scripts that said allowCarsi still work; CARSI itself is legacy/disabled
+   * by default, the generic publisher_browser provider handles the request).
    */
   allowCarsi?: boolean
   /**
    * Human-in-the-loop: the user manually downloaded the PDF (e.g. via the
-   * CARSI headed login or a publisher's human flow). The file is validated
+   * publisher's human flow or a headed login browser). The file is validated
    * (%PDF- magic, size), hashed and registered as pdfs/<sha256>.pdf with
    * provenance source=manual (NOT open access).
    */
@@ -48,17 +57,17 @@ export interface FetchPdfOutput {
   isOpenAccess?: boolean
   attempts: FetchAttempt[]
   reason?: string
-  /** set when the user must act (e.g. re-run the CARSI login CLI) */
-  userAction?: 'carsi_relogin'
+  /** set when the user must act (e.g. re-run the browser login CLI) */
+  userAction?: 'publisher_login' | 'carsi_relogin'
 }
 
-/** How many CARSI PDF_OK successes this push already has (maxPerPush cap). */
-function carsiSuccessCount(rt: LiteratureRuntime, pushId: number): number {
+/** How many institutional PDF_OK successes this push already has (maxPerPush cap). */
+function institutionalSuccessCount(rt: LiteratureRuntime, pushId: number): number {
   const row = rt.db
     .prepare(
       `SELECT COUNT(*) AS n FROM fetch_log f
        JOIN candidates c ON c.paper_id = f.paper_id
-       WHERE c.push_id = ? AND f.outcome = 'PDF_OK'`,
+       WHERE c.push_id = ? AND f.outcome = 'PDF_OK' AND f.access_type = 'institutional'`,
     )
     .get(pushId) as { n: number }
   return row?.n ?? 0
@@ -68,14 +77,19 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
   return defineTool({
     name: 'literature_fetch_pdf',
     description:
-      '多源回退下载论文 PDF：公开/OA 链（arXiv → OpenAlex OA → Unpaywall → Crossref 出版社链接）；全部失败且传入 allowCarsi=true（仅限已过质量门、公开全文全失败的论文）时，最后尝试 CARSI 机构授权（非 OA、低频）。终态：ok / PDF_OK / AUTH_REQUIRED（会话失效，需人工重新登录 CARSI）/ ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE。',
+      '多源回退下载论文 PDF：公开/OA 链（arXiv → OpenAlex OA → Unpaywall → Crossref 出版社链接）；全部失败且传入 allowInstitutional=true（或兼容别名 allowCarsi=true；仅限已过质量门、公开全文全失败的论文）时，按排名对达标候选依次尝试机构访问（默认 publisher_browser 通用出版社浏览器；CARSI 为 legacy/默认禁用）。终态：ok / PDF_OK / AUTH_REQUIRED（登录墙，需人工用 bin/dsh-literature-browser-login 完成登录）/ ACCESS_DENIED / PDF_NOT_FOUND / FULLTEXT_UNAVAILABLE。',
     parameters: {
       paperId: { type: 'string', required: true, description: '候选论文 id（来自 literature_sources）' },
       pushId: { type: 'integer', description: '推送号；提供时执行 SELECTED 不变式检查' },
+      allowInstitutional: {
+        type: 'boolean',
+        description:
+          '公开/OA 全失败后是否允许机构访问兜底（publisher_browser + 启用时的 CARSI；仅限质量门达标论文；严格低频，默认不传）',
+      },
       allowCarsi: {
         type: 'boolean',
         description:
-          '公开/OA 全失败后是否允许 CARSI 机构授权兜底（仅限质量门达标论文；严格低频，默认不传）',
+          '兼容别名（等价 allowInstitutional）。旧提示/脚本语义保持：公开/OA 全失败后允许机构访问兜底。CARSI 本身已标记 legacy 且默认禁用，实际由 publisher_browser 承担机构访问。',
       },
       manualPdfPath: {
         type: 'string',
@@ -100,7 +114,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
           accessType: { type: 'string', enum: ['oa', 'institutional'] },
           isOpenAccess: { type: 'boolean' },
           reason: { type: 'string' },
-          userAction: { type: 'string', enum: ['carsi_relogin'] },
+          userAction: { type: 'string', enum: ['publisher_login', 'carsi_relogin'] },
           attempts: {
             type: 'array',
             required: true,
@@ -129,9 +143,9 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
             value.outcome === 'ok'
               ? `PDF 下载成功（公开/OA）：${value.pdfSource} (sha256=${value.sha256?.slice(0, 12)}…)`
               : value.outcome === 'PDF_OK'
-                ? `PDF 下载成功（CARSI 机构授权，非 OA，仅私人文献库）：${value.pdfSource} (sha256=${value.sha256?.slice(0, 12)}…)`
+                ? `PDF 下载成功（机构访问，非 OA，仅私人文献库）：${value.pdfSource} (sha256=${value.sha256?.slice(0, 12)}…)`
                 : value.outcome === 'AUTH_REQUIRED'
-                  ? `AUTH_REQUIRED：CARSI 机构会话缺失或已失效（${value.attempts.filter((a) => a.status === 'auth_required').map((a) => a.detail).join('; ') || '详见 attempts'}）。请运行 dsh-literature-carsi-login 重新登录 CARSI 后重试；本次不进入 cooldown。`
+                  ? `AUTH_REQUIRED：出版社登录墙/机构会话缺失或已失效（${value.attempts.filter((a) => a.status === 'auth_required').map((a) => a.detail).join('; ') || '详见 attempts'}）。请运行 bin/dsh-literature-browser-login 完成合法登录后 --resume 继续；本次不进入 cooldown。`
                   : value.outcome === 'FULLTEXT_UNAVAILABLE'
                     ? `FULLTEXT_UNAVAILABLE：${value.attempts.length} 个源均失败。${value.attempts.map((a) => `${a.source}:${a.status}${a.detail ? `(${a.detail})` : ''}`).join(', ')}`
                     : `失败（${value.outcome}）：${value.reason ?? '未知原因'}。${value.attempts.map((a) => `${a.source}:${a.status}`).join(', ')}`,
@@ -183,7 +197,8 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
 
       const paper = rowToRef(row)
       const candidates = await rt.registry.pdfCandidates(paper)
-      if (candidates.length === 0 && !(args.allowCarsi && rt.carsi)) {
+      const wantInstitutional = args.allowInstitutional || args.allowCarsi === true
+      if (candidates.length === 0 && !(wantInstitutional && rt.providers.length > 0)) {
         return jsonSafe({
           paperId: args.paperId,
           outcome: 'FULLTEXT_UNAVAILABLE',
@@ -192,13 +207,13 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
         })
       }
 
-      // CARSI provider chain: opt-in + enabled + maxPerPush success cap.
-      // (minIntervalMinutes spacing is enforced inside the provider ledger.)
+      // Institutional provider chain: opt-in + enabled + maxPerPush success cap.
+      // (minIntervalMinutes spacing is enforced inside each provider ledger.)
       let providers: NonNullable<Parameters<typeof fetchPdf>[4]>['providers'] = []
       let capBlocked = false
-      if (args.allowCarsi && rt.carsi) {
-        const maxPerPush = rt.cfg.carsi.maxPerPush
-        const done = args.pushId !== undefined ? carsiSuccessCount(rt, args.pushId) : 0
+      if (wantInstitutional && rt.providers.length > 0) {
+        const maxPerPush = Math.min(rt.cfg.publisherBrowser.maxPerPush, rt.cfg.carsi.maxPerPush)
+        const done = args.pushId !== undefined ? institutionalSuccessCount(rt, args.pushId) : 0
         if (done >= maxPerPush) {
           capBlocked = true
         } else {
@@ -222,9 +237,11 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
       }
       const out: FetchPdfOutput = { paperId: args.paperId, ...result }
       if (capBlocked && result.outcome === 'FULLTEXT_UNAVAILABLE') {
-        out.reason = `CARSI 每推送上限已满（carsi.maxPerPush=${rt.cfg.carsi.maxPerPush}），本次未尝试机构授权`
+        out.reason = `机构访问每推送上限已满（maxPerPush=${Math.min(rt.cfg.publisherBrowser.maxPerPush, rt.cfg.carsi.maxPerPush)}），本次未尝试机构访问`
       }
-      if (result.outcome === 'AUTH_REQUIRED') out.userAction = 'carsi_relogin'
+      if (result.outcome === 'AUTH_REQUIRED') {
+        out.userAction = 'publisher_login'
+      }
       return jsonSafe(out)
     },
   })

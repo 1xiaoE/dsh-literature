@@ -2,6 +2,13 @@
  * CARSI (China Academic Research System Infrastructure, 中国教育和科研计算机网
  * 联邦认证与资源共享基础设施) institutional-access provider.
  *
+ * LEGACY / EXPERIMENTAL — DISABLED BY DEFAULT. The CARSI portal
+ * auto-navigation workflow is no longer part of the normal acquisition chain;
+ * the generic publisher-browser provider (providers/publisher_browser.ts) is
+ * the non-OA acquisition path. This file is kept for history and tests only;
+ * normal pushes never invoke CARSI unless explicitly re-enabled via
+ * config.carsi.enabled.
+ *
  * Responsibilities (all CARSI specifics live HERE, never in fetch/pdf.ts):
  * - independent persistent browser profile (REQUIRED by spec: never touches
  *   the user's daily browser profile / cookie DB);
@@ -12,173 +19,50 @@
  * - download validation: HTTP status, Content-Type, %PDF- magic, non-HTML,
  *   minimum size, sha256 (requirement 5).
  *
+ * Shared browser-driving infrastructure (PageLike/BrowserLike/launcher,
+ * validatePdfBuffer, classifyLoginWall, resolveCandidateUrls, ledger) is
+ * re-exported from providers/browser_lib.ts — see that module.
+ *
  * The provider is optional by construction: playwright is loaded lazily and
  * missing chromium/playwright degrades to PDF_NOT_FOUND with a clear reason.
  */
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Download, Page, Response } from 'playwright'
 import type { PaperRef } from '../sources/types.js'
 import type { PdfProvider, ProviderFetchOptions, ProviderResult } from './types.js'
+import {
+  classifyLoginWall,
+  launchPersistentBrowser,
+  resolveCandidateUrls,
+  validatePdfBuffer,
+  type BrowserLauncher,
+  type BrowserLike,
+  type PageLike,
+  type PageResponseLike,
+} from './browser_lib.js'
 
 export const CARSI_PORTAL_URL = 'https://ds.carsi.edu.cn/resource/resource.php'
 export const DEFAULT_PROFILE_DIR_NAME = 'browser-profile'
 
 /* ------------------------------------------------------------------ */
-/* Pure validation helpers (unit-testable without a browser)           */
+/* Shared browser-driving infrastructure (see browser_lib.ts)          */
 /* ------------------------------------------------------------------ */
 
-const PDF_MAGIC = Buffer.from('%PDF-')
-
-/** Validate a downloaded document (requirement 5: magic, non-HTML, size). */
-export function validatePdfBuffer(
-  buf: Buffer,
-  minBytes: number,
-  contentType?: string | null,
-): { ok: boolean; reason: string } {
-  if (contentType && /^text\/html/i.test(contentType)) {
-    return { ok: false, reason: `Content-Type ${contentType} 为 HTML（登录页/页面），拒绝` }
-  }
-  if (buf.length < PDF_MAGIC.length || !buf.subarray(0, PDF_MAGIC.length).equals(PDF_MAGIC)) {
-    return { ok: false, reason: '文件头不是 %PDF-（可能为 HTML 登录页或错误页）' }
-  }
-  if (buf.length < minBytes) {
-    return { ok: false, reason: `文件过小：${buf.length}B < ${minBytes}B` }
-  }
-  return { ok: true, reason: 'ok' }
-}
-
-const LOGIN_URL_RE =
-  /(?:login|signin|sign-in|sso|wayf|shibboleth|openauth|authn|auth\/|idp|cas|fed|saml|identity)/i
-
-const LOGIN_MARKERS = [
-  'sign in', 'sign-in', 'log in', 'please sign in', 'institutional login',
-  'access through your institution', 'institutional sign in', 'sso login',
-  '登录', '请登录', '机构登录', '统一身份认证', '登录以访问',
-]
-
-/**
- * Classify a page as a login wall. `auth` = the institutional session is
- * missing/expired (AUTH_REQUIRED); `denied` = session present but rejected
- * (HTTP 403, ACCESS_DENIED). A page that still exposes a PDF link is NOT a
- * wall even when it carries header "Sign In" links.
- */
-export function classifyLoginWall(opts: {
-  url: string
-  http?: number
-  title?: string
-  html?: string
-  hasPdfLink: boolean
-}): 'auth' | 'denied' | null {
-  if (opts.http === 403) return 'denied'
-  if (opts.http === 401) return 'auth'
-  if (LOGIN_URL_RE.test(opts.url)) return 'auth'
-  if (opts.hasPdfLink) return null
-  const hay = `${opts.title ?? ''} ${opts.html ?? ''}`.toLowerCase()
-  if (LOGIN_MARKERS.some((m) => hay.includes(m.toLowerCase()))) return 'auth'
-  return null
-}
-
-/** Resolve browser-driving candidate URLs from paper identity (req 4). */
-export function resolveCandidateUrls(paper: PaperRef): string[] {
-  const out: string[] = []
-  if (paper.doi) out.push(`https://doi.org/${encodeURIComponent(paper.doi)}`)
-  if (paper.url && /^https?:\/\//i.test(paper.url) && !/\.pdf($|\?)/i.test(paper.url)) {
-    out.push(paper.url)
-  }
-  return out
-}
+export {
+  BrowserLauncher,
+  BrowserLike,
+  PageDownloadLike,
+  PageLike,
+  PageResponseLike,
+  classifyLoginWall,
+  launchPersistentBrowser,
+  resolveCandidateUrls,
+  validatePdfBuffer,
+} from './browser_lib.js'
 
 /* ------------------------------------------------------------------ */
-/* Minimal browser surface (real launcher = playwright; tests stub it) */
-/* ------------------------------------------------------------------ */
-
-export interface PageResponseLike {
-  url(): string
-  status(): number
-  headers(): Record<string, string>
-  body(): Promise<Buffer>
-}
-
-export interface PageDownloadLike {
-  path(): Promise<string>
-  suggestedFilename(): string
-}
-
-export interface PageLike {
-  goto(url: string, opts?: { waitUntil?: string; timeout?: number }): Promise<{ status(): number } | null>
-  url(): string
-  title(): Promise<string>
-  content(): Promise<string>
-  on(event: 'response', cb: (res: PageResponseLike) => void): void
-  on(event: 'download', cb: (d: PageDownloadLike) => void): void
-  /** hrefs of all links matching the selector */
-  linkHrefs(sel: string): Promise<string[]>
-  /** fill an input and press Enter (portal search); false when not found */
-  fillAndSubmit(sel: string, value: string): Promise<boolean>
-  waitForTimeout(ms: number): Promise<void>
-  close(): Promise<void>
-}
-
-export interface BrowserLike {
-  newPage(): Promise<PageLike>
-  close(): Promise<void>
-}
-
-export type BrowserLauncher = (
-  profileDir: string,
-  opts: { headless: boolean; userAgent?: string },
-) => Promise<BrowserLike>
-
-/** Adapter from a real playwright page to the narrow PageLike surface. */
-function pageAdapter(page: Page): PageLike {
-  return {
-    goto: (url, o) =>
-      page
-        .goto(url, { waitUntil: (o?.waitUntil ?? 'load') as 'load', timeout: o?.timeout })
-        .then((r) => (r ? { status: () => r.status() } : null)),
-    url: () => page.url(),
-    title: () => page.title(),
-    content: () => page.content(),
-    on: (event, cb) => {
-      if (event === 'response') {
-        page.on('response', (r: Response) =>
-          (cb as (res: PageResponseLike) => void)({
-            url: () => r.url(),
-            status: () => r.status(),
-            headers: () => r.headers(),
-            body: () => r.body(),
-          }),
-        )
-      } else {
-        page.on('download', (d: Download) =>
-          (cb as (d: PageDownloadLike) => void)({
-            path: () => d.path(),
-            suggestedFilename: () => d.suggestedFilename(),
-          }),
-        )
-      }
-    },
-    linkHrefs: (sel) =>
-      page
-        .locator(sel)
-        .evaluateAll((els) => els.map((e) => String((e as { href?: string }).href ?? '')))
-        .catch(() => [] as string[]),
-    fillAndSubmit: async (sel, value) => {
-      const loc = page.locator(sel).first()
-      if ((await loc.count()) === 0) return false
-      await loc.fill(value)
-      await page.keyboard.press('Enter')
-      return true
-    },
-    waitForTimeout: (ms) => page.waitForTimeout(ms),
-    close: () => page.close(),
-  }
-}
-
-/* ------------------------------------------------------------------ */
-/* Session ledger (frequency + auth state, JSON under the data dir)    */
+/* CARSI session ledger (CARSI-specific path under the data dir)       */
 /* ------------------------------------------------------------------ */
 
 export interface CarsiLedger {
@@ -400,17 +284,7 @@ export class CarsiPdfProvider implements PdfProvider {
 
   private async launchBrowser(headless = this.opts.headless): Promise<BrowserLike> {
     if (this.launcher) return this.launcher(this.profileDir, { headless, userAgent: this.opts.userAgent })
-    const pw = await import('playwright')
-    const context = await pw.chromium.launchPersistentContext(this.profileDir, {
-      headless,
-      userAgent: this.opts.userAgent,
-      viewport: { width: 1280, height: 900 },
-      args: ['--disable-blink-features=AutomationControlled'],
-    })
-    return {
-      newPage: async () => pageAdapter(await context.newPage()),
-      close: async () => context.close(),
-    }
+    return launchPersistentBrowser(this.profileDir, { headless, userAgent: this.opts.userAgent })
   }
 
   private async tryUrl(

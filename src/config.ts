@@ -154,15 +154,51 @@ export interface LiteratureConfig {
   }
   carsi: {
     /**
-     * Master switch for the CARSI institutional-access fallback. CARSI is
-     * NOT an OA source (access_type=institutional, is_open_access=false) and
-     * is only ever used AFTER the whole public chain failed, for papers that
-     * already passed the ranking quality gates.
+     * Master switch for the CARSI institutional-access fallback.
+     *
+     * LEGACY / EXPERIMENTAL — DISABLED BY DEFAULT. The CARSI portal
+     * auto-navigation workflow is no longer part of the normal acquisition
+     * chain (see publisherBrowser). Kept for history and tests only; normal
+     * pushes never invoke CARSI unless explicitly re-enabled here.
+     *
+     * CARSI is NOT an OA source (access_type=institutional,
+     * is_open_access=false) and is only ever used AFTER the whole public
+     * chain failed, for papers that already passed the ranking quality gates.
      */
     enabled: boolean
     /** max CARSI-involved papers per push (strict low frequency; 1 = the picked paper only) */
     maxPerPush: number
     /** minimum minutes between CARSI browser attempts */
+    minIntervalMinutes: number
+    /** headless for cron pushes; the login CLI forces a headed browser */
+    headless: boolean
+    /** per-attempt browser timeout (ms) */
+    timeoutMs: number
+    /** persistent profile dir override; empty = <dataDir>/browser-profile */
+    profileDir: string
+    /** desktop User-Agent for the browser (SPs often block automation UAs) */
+    userAgent: string
+  }
+  /**
+   * Generic publisher-browser institutional access (replaces CARSI as the
+   * non-OA acquisition path). Quality First, Access Second: papers are ranked
+   * on academic merit; fulltext is acquired rank-by-rank afterwards.
+   *
+   * Flow: paper DOI / publisher URL → dedicated persistent browser →
+   * publisher article page → PDF. DOI direct resolution is preferred; when a
+   * login wall appears the workflow parks as AUTH_REQUIRED and the user
+   * completes a legal login in a headed browser (bin/dsh-literature-browser-login).
+   *
+   * Uses the SAME persistent profile as the (legacy) CARSI provider:
+   * ~/.local/share/dsh-literature/browser-profile/ — never the user's daily
+   * browser cookies. Sessions are reused across pushes until they expire.
+   */
+  publisherBrowser: {
+    /** master switch; default true (CARSI default false) */
+    enabled: boolean
+    /** max publisher-browser-involved papers per push (strict low frequency) */
+    maxPerPush: number
+    /** minimum minutes between browser attempts */
     minIntervalMinutes: number
     /** headless for cron pushes; the login CLI forces a headed browser */
     headless: boolean
@@ -179,7 +215,11 @@ export const DEFAULT_RANKING_WEIGHTS: RankingWeights = {
   recency: 0.15,
   impact: 0.15,
   topicSimilarity: 0.15,
-  fulltextAvailability: 0.15,
+  // OA/fulltext availability is NOT an academic-quality signal. It only hints
+  // at acquisition cost; quality must be decided on merit first (Quality
+  // First, Access Second). Kept at a near-zero floor so it can never let an
+  // easily-downloadable but weaker OA paper outrank a stronger non-OA one.
+  fulltextAvailability: 0.03,
   stageRelevance: 0.2,
   knowledgeGap: 0.1,
   priorityGoal: 0.1,
@@ -503,6 +543,18 @@ export function defaultConfig(): LiteratureConfig {
     fulltext: { maxChunkChars: 6000, minChars: 200, parserCommand: 'pdftotext', retryCooldownHours: 72 },
     http: { timeoutMs: 30000, minPdfBytes: 10240, unpaywallEmail: 'dsh-literature@example.org' },
     carsi: {
+      // LEGACY / EXPERIMENTAL — DISABLED BY DEFAULT. Normal pushes never
+      // invoke CARSI; the generic publisher-browser provider (publisherBrowser)
+      // is the institutional-access path. Re-enable only deliberately.
+      enabled: false,
+      maxPerPush: 1,
+      minIntervalMinutes: 120,
+      headless: true,
+      timeoutMs: 90000,
+      profileDir: '',
+      userAgent: DEFAULT_CARSI_USER_AGENT,
+    },
+    publisherBrowser: {
       enabled: true,
       maxPerPush: 1,
       minIntervalMinutes: 120,
@@ -590,6 +642,7 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
     fulltext: { ...base.fulltext },
     http: { ...base.http },
     carsi: { ...base.carsi },
+    publisherBrowser: { ...base.publisherBrowser },
   }
   if (Array.isArray(partial.topics)) {
     const defs = partial.topics.filter(isTopicDef)
@@ -680,6 +733,27 @@ export function normalizeConfig(partial: Partial<LiteratureConfig> | undefined):
       timeoutMs: pickNumber(partial.carsi, 'timeoutMs', base.carsi.timeoutMs),
       profileDir: pickString(partial.carsi, 'profileDir', base.carsi.profileDir),
       userAgent: pickString(partial.carsi, 'userAgent', base.carsi.userAgent),
+    }
+  }
+  if (isRecord(partial.publisherBrowser)) {
+    out.publisherBrowser = {
+      enabled:
+        typeof partial.publisherBrowser.enabled === 'boolean'
+          ? partial.publisherBrowser.enabled
+          : base.publisherBrowser.enabled,
+      maxPerPush: pickNumber(partial.publisherBrowser, 'maxPerPush', base.publisherBrowser.maxPerPush),
+      minIntervalMinutes: pickNumber(
+        partial.publisherBrowser,
+        'minIntervalMinutes',
+        base.publisherBrowser.minIntervalMinutes,
+      ),
+      headless:
+        typeof partial.publisherBrowser.headless === 'boolean'
+          ? partial.publisherBrowser.headless
+          : base.publisherBrowser.headless,
+      timeoutMs: pickNumber(partial.publisherBrowser, 'timeoutMs', base.publisherBrowser.timeoutMs),
+      profileDir: pickString(partial.publisherBrowser, 'profileDir', base.publisherBrowser.profileDir),
+      userAgent: pickString(partial.publisherBrowser, 'userAgent', base.publisherBrowser.userAgent),
     }
   }
   return out
