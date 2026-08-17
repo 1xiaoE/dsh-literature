@@ -52,8 +52,8 @@ export interface FetchResult {
   pdfPath?: string
   sha256?: string
   pdfSource?: string
-  /** provenance: 'oa' | 'institutional' (requirement 1) */
-  accessType?: 'oa' | 'institutional'
+  /** provenance: 'oa' | 'institutional' | 'manual' (requirement 1) */
+  accessType?: 'oa' | 'institutional' | 'manual'
   isOpenAccess?: boolean
   attempts: FetchAttempt[]
 }

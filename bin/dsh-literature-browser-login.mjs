@@ -70,7 +70,7 @@ function parseArgs(argv) {
 function paperUrlFromPush(db, pushId) {
   const row = db
     .prepare(
-      `SELECT p.paper_id FROM user_actions ua
+      `SELECT ua.paper_id FROM user_actions ua
        JOIN pushes p ON p.id = ua.push_id
        WHERE ua.push_id = ? AND ua.state = 'open'
          AND ua.kind IN ('publisher_login', 'carsi_relogin')

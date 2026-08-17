@@ -373,7 +373,7 @@ describe('v9 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v9-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(13)
+    expect(version.user_version).toBe(14)
     const pushId = startPush(db, 't', 1).pushId
     db.prepare(
       `INSERT INTO papers (id, title, authors, metadata_source)

@@ -53,7 +53,7 @@ export interface FetchPdfOutput {
   pdfPath?: string
   sha256?: string
   pdfSource?: string
-  accessType?: 'oa' | 'institutional'
+  accessType?: 'oa' | 'institutional' | 'manual'
   isOpenAccess?: boolean
   attempts: FetchAttempt[]
   reason?: string
@@ -111,7 +111,7 @@ export function defineLiteratureFetchPdf(getRt: () => LiteratureRuntime) {
           pdfPath: { type: 'string' },
           sha256: { type: 'string' },
           pdfSource: { type: 'string' },
-          accessType: { type: 'string', enum: ['oa', 'institutional'] },
+          accessType: { type: 'string', enum: ['oa', 'institutional', 'manual'] },
           isOpenAccess: { type: 'boolean' },
           reason: { type: 'string' },
           userAction: { type: 'string', enum: ['publisher_login', 'carsi_relogin'] },
@@ -290,8 +290,8 @@ function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: s
   const pdfSource = `manual: ${manualPath}`
   rt.db
     .prepare(
-      `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, pdf_source, sha256, is_open_access)
-       VALUES (?, ?, 'PDF_OK', ?, ?, ?, 0)`,
+      `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, pdf_source, sha256, access_type, is_open_access)
+       VALUES (?, ?, 'PDF_OK', ?, ?, ?, 'manual', 0)`,
     )
     .run(
       paperId,
@@ -306,6 +306,7 @@ function registerManualPdf(rt: LiteratureRuntime, paperId: string, manualPath: s
     pdfPath,
     sha256,
     pdfSource,
+    accessType: 'manual',
     isOpenAccess: false,
     attempts: [{ source: 'manual', url: manualPath, status: 'ok' }],
     reason: '用户手动下载的 PDF 已登记（source=manual，非 OA，仅私人文献库）',

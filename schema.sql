@@ -124,8 +124,8 @@ CREATE TABLE IF NOT EXISTS fetch_log (
   pdf_path       TEXT,
   pdf_source     TEXT,                                -- provenance: winning URL + license
   sha256         TEXT,
-  access_type    TEXT CHECK (access_type IS NULL OR access_type IN ('oa','institutional')),  -- provenance (req 1)
-  is_open_access INTEGER,                             -- provenance: 0 for institutional (CARSI)
+  access_type    TEXT CHECK (access_type IS NULL OR access_type IN ('oa','institutional','manual')),  -- provenance (req 1)
+  is_open_access INTEGER,                             -- provenance: 0 for institutional/manual
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
