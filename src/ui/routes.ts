@@ -19,6 +19,7 @@ import {
   getDashboard,
   getPaperDetail,
   getPushStatus,
+  latestRunnerLog,
   listPapers,
   canResumePush,
   startResume,
@@ -49,8 +50,8 @@ export interface WebRouteLike {
 /** Route dependencies: the same lazy runtime the tools use. */
 export interface UiRouteDeps {
   getRt: () => LiteratureRuntime
-  startPush?: (keyword: string) => UiRunResult
-  startResume?: (pushId: number) => UiRunResult
+  startPush?: (keyword: string, rt?: LiteratureRuntime) => UiRunResult | Promise<UiRunResult>
+  startResume?: (pushId: number, rt?: LiteratureRuntime) => UiRunResult | Promise<UiRunResult>
 }
 
 /** Cap on JSON request bodies (Run/Resume payloads are tiny). */
@@ -356,7 +357,7 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
             return
           }
           const keyword = typeof body?.keyword === 'string' ? body.keyword.trim() : ''
-          const result = (deps.startPush ?? startPush)(keyword)
+          const result = await (deps.startPush ?? startPush)(keyword, rt)
           writeJson(res, result.ok ? 200 : result.errorCode === 'WORKFLOW_ALREADY_RUNNING' ? 409 : 500, result)
           return
         }
@@ -371,8 +372,17 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
             err(res, 409, 'RESUME_NOT_AVAILABLE')
             return
           }
-          const result = (deps.startResume ?? startResume)(pushId)
+          const result = await (deps.startResume ?? startResume)(pushId, deps.getRt())
           writeJson(res, result.ok ? 200 : result.errorCode === 'WORKFLOW_ALREADY_RUNNING' ? 409 : 500, result)
+          return
+        }
+        if (rest === '/runner-log' && guard(req, res, 'GET')) {
+          const log = latestRunnerLog(deps.getRt())
+          if (log === null) {
+            err(res, 404, 'NO_RUNNER_LOG')
+            return
+          }
+          writeJson(res, 200, log)
           return
         }
         if (rest === '/health' && guard(req, res, 'GET')) {

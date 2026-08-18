@@ -176,5 +176,7 @@ export interface UiRunResult {
   errorCode?: 'WORKFLOW_ALREADY_RUNNING' | 'RESUME_NOT_AVAILABLE'
   pushId?: number | null
   pid?: number | null
+  /** Captured runner log (stderr/stdout) path; set when logging is enabled. */
+  logPath?: string | null
   message: string
 }

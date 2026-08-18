@@ -140,6 +140,17 @@ export class LiteratureApi {
     }))
   }
 
+  /** Tail of the latest runner log (stderr/stdout capture), or null. */
+  async runnerLog(): Promise<{ path: string; content: string } | null> {
+    try {
+      const response = await fetch(`${BASE}/runner-log`)
+      if (!response.ok) return null
+      return await readJson<{ path: string; content: string }>(response)
+    } catch {
+      return null
+    }
+  }
+
   importPdf(file: File): Promise<{ paperId: string }> {
     return fetch(`${BASE}/import-pdf${query({ filename: file.name })}`, {
       method: 'POST', headers: { 'content-type': file.type || 'application/pdf' }, body: file,

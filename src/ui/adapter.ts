@@ -10,11 +10,13 @@
  * panel is a pure VIEW over persisted push columns (performance audit +
  * progress counters) — the workflow itself is untouched.
  */
-import { spawn } from 'node:child_process'
-import { statSync } from 'node:fs'
+import { spawn, type StdioOptions } from 'node:child_process'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, type WriteStream } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Db } from '../db.js'
 import type { LiteratureConfig } from '../config.js'
+import type { LiteratureRuntime } from '../lib/runtime.js'
 import { expandHome } from '../lib/paths.js'
 import { listPaperFields, listResearchFields } from '../lib/research_fields.js'
 import type {
@@ -704,8 +706,10 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
 // ---------------------------------------------------------------------------
 // Workflow launchers — Run / Resume reuse the EXISTING CLI workflow runner
 // (bin/dsh-literature-push.mjs → headless dsh profile → literature_* tools).
-// The HTTP layer just starts the process; the Execution panel follows the
-// same SQLite state the running workflow writes. No workflow is re-implemented.
+// The HTTP layer starts the process and watches its early startup: runner
+// stderr/stdout is captured to <dataDir>/runs/runner-*.log, and an immediate
+// non-zero exit (e.g. ENOSPC on boot) is reported back instead of the UI
+// seeing only "started". No workflow is re-implemented.
 // ---------------------------------------------------------------------------
 
 /** Absolute path of the shipped CLI workflow runner. */
@@ -744,39 +748,143 @@ export function canResumePush(db: Db, pushId: number): boolean {
     && row.is_latest === 1
 }
 
-let workflowProcessActive = false
+/** How long /run waits for an immediate runner crash before declaring it started. */
+export const RUNNER_GRACE_MS = 5000
 
-function spawnCli(args: string[]): UiRunResult {
-  if (workflowProcessActive) {
+/** Max chars of the runner log tail embedded in the failure message. */
+const FAILURE_TAIL_CHARS = 800
+
+/** Max chars served by the /runner-log endpoint. */
+const LOG_SERVE_CHARS = 8000
+
+/** Human-readable runner failure line (pure — testable). */
+export function formatRunnerFailure(code: number | null, signal: string | null, tail: string): string {
+  const where = code !== null ? `exit code ${code}` : `signal ${signal ?? 'unknown'}`
+  const detail = tail.trim().split('\n').slice(-8).join(' | ').trim().slice(0, FAILURE_TAIL_CHARS)
+  return `runner exited early (${where})${detail !== '' ? `: ${detail}` : ''}`
+}
+
+/** Runner argv → <dataDir>/runs log path (null when logging disabled). */
+function runnerLogPath(logDir: string | null | undefined): string | null {
+  if (logDir === undefined || logDir === null || logDir === '') return null
+  mkdirSync(logDir, { recursive: true })
+  return join(logDir, `runner-${Date.now()}.log`)
+}
+
+/** Mutable double-launch guard (kept inside runCli via opts.flag). */
+export interface RunnerActiveFlag {
+  active: boolean
+}
+
+export interface RunCliOptions {
+  /** directory for runner-*.log capture; null/undefined disables logging */
+  logDir?: string | null
+  /** early-exit detection window (default RUNNER_GRACE_MS) */
+  graceMs?: number
+  /** double-launch guard shared by the workflow launchers */
+  flag?: RunnerActiveFlag
+}
+
+/**
+ * Spawn a CLI runner, capture stdout/stderr to a log file, and detect an
+ * immediate crash (non-zero exit within the grace window) so the caller can
+ * surface the real error instead of a silent "started".
+ * @param bin - executable to run.
+ * @param args - CLI arguments.
+ * @param opts - logging, grace window, double-launch guard.
+ * @returns the run result (ok=false carries the failure tail in message).
+ */
+export async function runCli(bin: string, args: string[], opts: RunCliOptions = {}): Promise<UiRunResult> {
+  if (opts.flag !== undefined && opts.flag.active) {
     return { ok: false, errorCode: 'WORKFLOW_ALREADY_RUNNING', message: 'WORKFLOW_ALREADY_RUNNING' }
   }
+  const graceMs = opts.graceMs ?? RUNNER_GRACE_MS
+  const logPath = runnerLogPath(opts.logDir)
+  const stdio: StdioOptions = logPath !== null ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'ignore', 'ignore']
+
+  let child
   try {
-    workflowProcessActive = true
-    const child = spawn(process.execPath, [pushCliPath(), ...args], {
-      detached: true,
-      stdio: 'ignore',
-      env: process.env,
-    })
-    const release = (): void => { workflowProcessActive = false }
-    child.once('error', release)
-    child.once('exit', release)
-    child.unref()
-    return { ok: true, pid: child.pid ?? null, message: `started dsh-literature-push ${args.join(' ')}` }
+    child = spawn(bin, args, { detached: true, stdio, env: process.env })
   } catch (error) {
-    workflowProcessActive = false
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
+  if (opts.flag !== undefined) opts.flag.active = true
+  const pid = child.pid ?? null
+
+  let log: WriteStream | undefined
+  if (logPath !== null) {
+    log = createWriteStream(logPath)
+    child.stdout?.pipe(log)
+    child.stderr?.pipe(log)
+  }
+  const closeLog = (): void => {
+    if (log === undefined) return
+    try { log.end() } catch { /* already closed */ }
+  }
+  const release = (): void => { if (opts.flag !== undefined) opts.flag.active = false }
+  child.once('exit', () => { closeLog(); release() })
+  child.once('error', () => { closeLog(); release() })
+  child.unref()
+
+  // Bounded early-exit detection: resolves with the exit code when the runner
+  // dies inside the grace window, null when it is still alive after it.
+  const earlyExit = await new Promise<{ code: number | null; signal: string | null } | null>((resolve) => {
+    const timer = setTimeout(() => resolve(null), graceMs)
+    child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }) })
+    child.once('error', () => { clearTimeout(timer); resolve({ code: -1, signal: null }) })
+  })
+  if (earlyExit === null) {
+    return { ok: true, pid, logPath, message: `started ${bin} ${args.join(' ')}` }
+  }
+  closeLog()
+  if (earlyExit.code !== 0) {
+    const tail = logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''
     return {
       ok: false,
-      message: error instanceof Error ? error.message : String(error),
+      pid,
+      logPath,
+      message: formatRunnerFailure(earlyExit.code, earlyExit.signal, tail),
     }
   }
+  return { ok: true, pid, logPath, message: `finished ${bin} ${args.join(' ')} (exit 0)` }
+}
+
+/** Module-level double-launch guard for the workflow CLI launchers. */
+const workflowFlag: RunnerActiveFlag = { active: false }
+
+/** <dataDir>/runs for the workflow runner (fallback: no logging). */
+function workflowLogDir(rt: LiteratureRuntime | undefined): string | null {
+  return rt !== undefined ? join(rt.dataDir, 'runs') : null
+}
+
+/** Spawn the existing workflow CLI with log capture + early-exit detection. */
+async function spawnCli(args: string[], rt?: LiteratureRuntime): Promise<UiRunResult> {
+  return runCli(pushCliPath(), args, { logDir: workflowLogDir(rt), flag: workflowFlag })
 }
 
 /** Run the existing workflow with an optional keyword (enters as --topic). */
-export function startPush(keyword: string): UiRunResult {
-  return spawnCli(pushCliArgs(keyword))
+export function startPush(keyword: string, rt?: LiteratureRuntime): Promise<UiRunResult> {
+  return spawnCli(pushCliArgs(keyword), rt)
 }
 
 /** Resume a parked push (AUTH_REQUIRED / NEED_USER_ACTION / interrupted). */
-export function startResume(pushId: number): UiRunResult {
-  return spawnCli(resumeCliArgs(pushId))
+export function startResume(pushId: number, rt?: LiteratureRuntime): Promise<UiRunResult> {
+  return spawnCli(resumeCliArgs(pushId), rt)
+}
+
+/**
+ * Tail of the newest runner log (for the UI's log viewer), or null when no
+ * run has been captured yet.
+ */
+export function latestRunnerLog(rt: LiteratureRuntime | undefined): { path: string; content: string } | null {
+  const logDir = workflowLogDir(rt)
+  if (logDir === null || !existsSync(logDir)) return null
+  const files = readdirSync(logDir)
+    .filter((name) => name.startsWith('runner-') && name.endsWith('.log'))
+    .map((name) => ({ name, mtime: statSync(join(logDir, name)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime)
+  const newest = files[0]
+  if (newest === undefined) return null
+  const path = join(logDir, newest.name)
+  return { path, content: readFileSync(path, 'utf8').slice(-LOG_SERVE_CHARS) }
 }

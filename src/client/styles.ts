@@ -10,7 +10,7 @@ export const CSS = {
   stepList: 'dsh-lit-step-list', step: 'dsh-lit-step', stepDone: 'dsh-lit-step-done', stepActive: 'dsh-lit-step-active', stepMuted: 'dsh-lit-step-muted', stepText: 'dsh-lit-step-text', spinner: 'dsh-lit-spinner',
   authCard: 'dsh-lit-auth-card', authTitle: 'dsh-lit-auth-title', authGrid: 'dsh-lit-auth-grid', authLabel: 'dsh-lit-auth-label', authValue: 'dsh-lit-auth-value',
   button: 'dsh-lit-button', buttonPrimary: 'dsh-lit-button-primary', buttonGhost: 'dsh-lit-button-ghost', input: 'dsh-lit-input',
-  searchRow: 'dsh-lit-search-row', searchModes: 'dsh-lit-search-modes', searchMode: 'dsh-lit-search-mode', searchModeActive: 'dsh-lit-search-mode-active', searchMessage: 'dsh-lit-search-message',
+  searchRow: 'dsh-lit-search-row', searchModes: 'dsh-lit-search-modes', searchMode: 'dsh-lit-search-mode', searchModeActive: 'dsh-lit-search-mode-active', searchMessage: 'dsh-lit-search-message', runnerLog: 'dsh-lit-runner-log',
   paperCard: 'dsh-lit-paper-card', paperCardActive: 'dsh-lit-paper-card-active', paperTitle: 'dsh-lit-paper-title', paperMeta: 'dsh-lit-paper-meta', paperFlags: 'dsh-lit-paper-flags', flag: 'dsh-lit-flag',
   categoryItem: 'dsh-lit-category-item', categoryItemActive: 'dsh-lit-category-item-active', categoryGroup: 'dsh-lit-category-group', categorySummary: 'dsh-lit-category-summary', categoryBody: 'dsh-lit-category-body', categoryRow: 'dsh-lit-category-row', categoryIcon: 'dsh-lit-category-icon', categoryLabel: 'dsh-lit-category-label', categoryCount: 'dsh-lit-category-count', categoryAdd: 'dsh-lit-category-add', categoryManage: 'dsh-lit-category-manage', categoryMenu: 'dsh-lit-category-menu', fieldForm: 'dsh-lit-field-form', fieldChips: 'dsh-lit-field-chips', fieldChip: 'dsh-lit-field-chip', fieldPicker: 'dsh-lit-field-picker',
   detailField: 'dsh-lit-detail-field', detailHeader: 'dsh-lit-detail-header', detailTitle: 'dsh-lit-detail-title', detailMeta: 'dsh-lit-detail-meta', detailActions: 'dsh-lit-detail-actions', detailSection: 'dsh-lit-detail-section', detailSectionTitle: 'dsh-lit-detail-section-title', detailLabel: 'dsh-lit-detail-label', detailValue: 'dsh-lit-detail-value', detailAbstract: 'dsh-lit-detail-abstract',
@@ -234,6 +234,7 @@ html[data-dsh-literature-active]:not([data-dsh-taskboard-active]):not([data-dsh-
 .${CSS.input}::placeholder { color: var(--dsh-lit-text-muted); }
 .${CSS.input}:focus { border-color: var(--dsh-lit-accent); }
 .${CSS.searchMessage} { margin: 0; color: var(--dsh-lit-text-secondary); font-size: var(--dsh-lit-font-caption); line-height: 1.45; overflow-wrap: anywhere; }
+.${CSS.runnerLog} { margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; color: var(--dsh-lit-text-secondary); background: var(--dsh-lit-bg-card); border: 1px solid var(--dsh-lit-border-strong); border-radius: 7px; font-family: var(--dsh-font-markdown-code-block-small, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .${CSS.button} { display: inline-flex; align-items: center; justify-content: center; min-height: 30px; padding: 5px 10px; border-radius: 7px; cursor: pointer; font: inherit; font-size: var(--dsh-lit-font-caption); font-weight: 600; line-height: 1.25; text-decoration: none; white-space: nowrap; }
 .${CSS.button}:disabled { opacity: .48; cursor: default; }

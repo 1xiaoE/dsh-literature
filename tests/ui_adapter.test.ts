@@ -10,13 +10,16 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { openDb, upsertPaper, type Db } from '../src/db.js'
 import {
+  formatRunnerFailure,
   getDashboard,
   getPaperDetail,
   getPushStatus,
+  latestRunnerLog,
   listCategories,
   listPapers,
   pushCliArgs,
   resumeCliArgs,
+  runCli,
 } from '../src/ui/adapter.js'
 import { defaultConfig } from '../src/config.js'
 import * as uiAdapter from '../src/ui/adapter.js'
@@ -501,4 +504,74 @@ describe('ui adapter — workflow launchers', () => {
   it('maps resume to --resume <pushId>', () => {
     expect(resumeCliArgs(9)).toEqual(['--resume', '9'])
   })
+})
+
+describe('ui adapter — runner launch (log capture + early-exit detection)', () => {
+  it('formats runner failures with the log tail', () => {
+    expect(formatRunnerFailure(3, null, 'boom early\nmore')).toContain('exit code 3')
+    expect(formatRunnerFailure(3, null, 'boom early\nmore')).toContain('boom early')
+    expect(formatRunnerFailure(null, 'SIGTERM', '')).toContain('signal SIGTERM')
+  })
+
+  it('returns ok=false with stderr tail when the runner dies inside the grace window', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-run-'))
+    try {
+      const result = await runCli(process.execPath, ['-e', "console.error('BOOT_FAIL'); process.exit(3)"], {
+        logDir: join(dir, 'runs'),
+        graceMs: 3000,
+      })
+      expect(result.ok).toBe(false)
+      expect(result.message).toContain('exit code 3')
+      expect(result.message).toContain('BOOT_FAIL')
+      expect(result.logPath).toBeTruthy()
+      expect(latestRunnerLog({ dataDir: dir } as never)).not.toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports started while the runner is still alive after the grace window', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-run-'))
+    try {
+      const result = await runCli(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+        logDir: dir,
+        graceMs: 1200,
+      })
+      expect(result.ok).toBe(true)
+      expect(typeof result.pid).toBe('number')
+      if (result.pid !== null && result.pid !== undefined) {
+        try { process.kill(result.pid) } catch { /* already gone */ }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15000)
+
+  it('latestRunnerLog returns null before any run', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-run-'))
+    try {
+      expect(latestRunnerLog({ dataDir: dir } as never)).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('respects the double-launch guard flag', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-run-'))
+    try {
+      const flag = { active: false }
+      // First launch occupies the flag for the grace window.
+      const first = runCli(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { logDir: dir, graceMs: 1500, flag })
+      const second = await runCli(process.execPath, ['-e', 'process.exit(0)'], { logDir: dir, graceMs: 500, flag })
+      expect(second.ok).toBe(false)
+      expect(second.errorCode).toBe('WORKFLOW_ALREADY_RUNNING')
+      const firstResult = await first
+      expect(firstResult.ok).toBe(true)
+      if (firstResult.pid !== null && firstResult.pid !== undefined) {
+        try { process.kill(firstResult.pid) } catch { /* already gone */ }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }, 15000)
 })
