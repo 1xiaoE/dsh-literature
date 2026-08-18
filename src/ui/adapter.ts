@@ -764,6 +764,32 @@ export function formatRunnerFailure(code: number | null, signal: string | null, 
   return `runner exited early (${where})${detail !== '' ? `: ${detail}` : ''}`
 }
 
+/** Env keys the harness treats as internal/sensitive and scrubs from children. */
+const SENSITIVE_ENV_PATTERN = /(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)/i
+
+/** Explicit allowlist: legitimate runner config that may look "sensitive". */
+const RUNNER_ENV_ALLOWLIST = new Set(['OPENALEX_API_KEY'])
+
+/**
+ * Child env for the workflow runner: the parent env minus harness-internal
+ * DSH_* entries and credential-shaped keys (mirrors the harness subprocess
+ * scrub — raw process.env can carry runtime-injected state that makes
+ * execve fail), plus an explicit allowlist for documented runner config.
+ * Pure — testable.
+ */
+export function runnerChildEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(parent)) {
+    if (value === undefined) continue
+    const upper = key.toUpperCase()
+    if (upper.startsWith('DSH_')) continue
+    if (RUNNER_ENV_ALLOWLIST.has(key)) { env[key] = value; continue }
+    if (SENSITIVE_ENV_PATTERN.test(key)) continue
+    env[key] = value
+  }
+  return env
+}
+
 /** Runner argv → <dataDir>/runs log path (null when logging disabled). */
 function runnerLogPath(logDir: string | null | undefined): string | null {
   if (logDir === undefined || logDir === null || logDir === '') return null
@@ -783,16 +809,24 @@ export interface RunCliOptions {
   graceMs?: number
   /** double-launch guard shared by the workflow launchers */
   flag?: RunnerActiveFlag
+  /** explicit working directory for the child (default: process.cwd()) */
+  cwd?: string
 }
 
 /**
  * Spawn a CLI runner, capture stdout/stderr to a log file, and detect an
  * immediate crash (non-zero exit within the grace window) so the caller can
  * surface the real error instead of a silent "started".
+ *
+ * The child env is scrubbed like the harness subprocess layer does (DSH_* /
+ * credential-shaped keys dropped, OPENALEX_API_KEY allowlisted) and an
+ * explicit cwd is set: raw process.env in the web host can carry
+ * runtime-injected state that makes execve fail. Spawn failures now carry the
+ * actual error (code / syscall / path) instead of a bare "-1".
  * @param bin - executable to run.
  * @param args - CLI arguments.
- * @param opts - logging, grace window, double-launch guard.
- * @returns the run result (ok=false carries the failure tail in message).
+ * @param opts - logging, grace window, double-launch guard, cwd.
+ * @returns the run result (ok=false carries the failure detail in message).
  */
 export async function runCli(bin: string, args: string[], opts: RunCliOptions = {}): Promise<UiRunResult> {
   if (opts.flag !== undefined && opts.flag.active) {
@@ -802,12 +836,13 @@ export async function runCli(bin: string, args: string[], opts: RunCliOptions = 
   const logPath = runnerLogPath(opts.logDir)
   const stdio: StdioOptions = logPath !== null ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'ignore', 'ignore']
 
-  let child
-  try {
-    child = spawn(bin, args, { detached: true, stdio, env: process.env })
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) }
-  }
+  const child = spawn(bin, args, {
+    detached: true,
+    stdio,
+    env: runnerChildEnv(),
+    cwd: opts.cwd ?? process.cwd(),
+  })
+
   if (opts.flag !== undefined) opts.flag.active = true
   const pid = child.pid ?? null
 
@@ -828,16 +863,25 @@ export async function runCli(bin: string, args: string[], opts: RunCliOptions = 
 
   // Bounded early-exit detection: resolves with the exit code when the runner
   // dies inside the grace window, null when it is still alive after it.
-  const earlyExit = await new Promise<{ code: number | null; signal: string | null } | null>((resolve) => {
+  const earlyExit = await new Promise<{ code: number | null; signal: string | null; spawnError?: string } | null>((resolve) => {
     const timer = setTimeout(() => resolve(null), graceMs)
     child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }) })
-    child.once('error', () => { clearTimeout(timer); resolve({ code: -1, signal: null }) })
+    child.once('error', (error) => {
+      clearTimeout(timer)
+      const detail = error instanceof Error
+        ? `${error.message}${'code' in error ? ` (${String((error as NodeJS.ErrnoException).code)})` : ''}`
+        : String(error)
+      resolve({ code: -1, signal: null, spawnError: detail })
+    })
   })
   if (earlyExit === null) {
     return { ok: true, pid, logPath, message: `started ${bin} ${args.join(' ')}` }
   }
   closeLog()
   if (earlyExit.code !== 0) {
+    if (earlyExit.spawnError !== undefined) {
+      return { ok: false, pid, logPath, message: `runner spawn failed: ${earlyExit.spawnError}` }
+    }
     const tail = logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''
     return {
       ok: false,

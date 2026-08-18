@@ -20,6 +20,7 @@ import {
   pushCliArgs,
   resumeCliArgs,
   runCli,
+  runnerChildEnv,
 } from '../src/ui/adapter.js'
 import { defaultConfig } from '../src/config.js'
 import * as uiAdapter from '../src/ui/adapter.js'
@@ -574,4 +575,38 @@ describe('ui adapter — runner launch (log capture + early-exit detection)', ()
       rmSync(dir, { recursive: true, force: true })
     }
   }, 15000)
+})
+
+describe('ui adapter — runner env scrub and spawn failure detail', () => {
+  it('drops harness-internal DSH_* and credential-shaped keys, allowlists OPENALEX_API_KEY', () => {
+    const env = runnerChildEnv({
+      DSH_SESSION_ID: 'session-1',
+      DSH_WEB_URL: 'http://127.0.0.1:3080',
+      OPENALEX_API_KEY: 'sk-live-123',
+      MY_SECRET_TOKEN: 'shh',
+      PATH: '/usr/bin',
+      HOME: '/home/eternal',
+      PLAIN: 'value',
+    })
+    expect(env.DSH_SESSION_ID).toBeUndefined()
+    expect(env.DSH_WEB_URL).toBeUndefined()
+    expect(env.MY_SECRET_TOKEN).toBeUndefined()
+    expect(env.OPENALEX_API_KEY).toBe('sk-live-123')
+    expect(env.PATH).toBe('/usr/bin')
+    expect(env.HOME).toBe('/home/eternal')
+    expect(env.PLAIN).toBe('value')
+  })
+
+  it('surfaces the actual spawn error (e.g. ENOENT) instead of a bare -1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-run-'))
+    try {
+      const result = await runCli('/nonexistent/runner-bin', ['--topic', 'x'], { logDir: dir, graceMs: 2000 })
+      expect(result.ok).toBe(false)
+      expect(result.message).toContain('runner spawn failed')
+      expect(result.message).toMatch(/ENOENT|spawn/i)
+      expect(result.pid).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
