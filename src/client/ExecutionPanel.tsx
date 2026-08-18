@@ -146,6 +146,14 @@ function AuthCard({ status, api }: { status: UiPushStatus; api: LiteratureApi })
 
 export function ExecutionPanel({ status, api }: ExecutionPanelProps) {
   const warning = status.phase === 'auth_required'
+
+  // Elapsed wall time for a live push (SQLite timestamps are UTC).
+  const elapsedMinutes = (iso: string | null): number | null => {
+    if (iso === null) return null
+    const parsed = Date.parse(`${iso.replace(' ', 'T')}Z`)
+    return Number.isNaN(parsed) ? null : Math.max(0, Math.floor((Date.now() - parsed) / 60000))
+  }
+
   return (
     <section className={`${CSS.panel} ${CSS.execution} ${warning ? CSS.executionWarning : ''}`}>
       <header className={CSS.detailHeader}>
@@ -154,8 +162,16 @@ export function ExecutionPanel({ status, api }: ExecutionPanelProps) {
           <span className={`${CSS.statusBadge} ${phaseClass(status.phase)}`}>
             {status.pushId === null ? phaseLabel(status.phase) : `${t('push.prefix')} #${status.pushId} · ${phaseLabel(status.phase)}`}
           </span>
+          {status.running && status.startedAt !== null && (
+            <span className={CSS.detailMeta}>{`${t('push.elapsed')} ${elapsedMinutes(status.startedAt)}m`}</span>
+          )}
           {status.topic !== null && <span className={CSS.detailMeta}>{status.topic}{status.stageLabel === null ? '' : ` · ${status.stageLabel}`}</span>}
         </div>
+        {status.staleRunning && (
+          <p className={CSS.searchMessage} style={{ color: 'var(--dsh-lit-warn, #b58900)' }}>
+            ⚠ {t('push.stale').replace('{m}', String(elapsedMinutes(status.lastActivityAt) ?? 0))}
+          </p>
+        )}
         {status.present ? <WorkflowProgress status={status} /> : <p className={CSS.empty}>{t('push.none')}</p>}
         <WorkflowLogs status={status} />
       </header>

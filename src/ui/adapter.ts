@@ -964,7 +964,9 @@ function workflowLogDir(rt: LiteratureRuntime | undefined): string | null {
 
 /** Spawn the existing workflow CLI with log capture + early-exit detection. */
 async function spawnCli(args: string[], rt?: LiteratureRuntime): Promise<UiRunResult> {
-  return runCli(pushCliPath(), args, { logDir: workflowLogDir(rt), flag: workflowFlag })
+  // Launch through node explicitly: the .mjs ships without the execute bit
+  // (mode 600), so exec'ing it directly fails with EACCES.
+  return runCli(process.execPath, [pushCliPath(), ...args], { logDir: workflowLogDir(rt), flag: workflowFlag })
 }
 
 /** Run the existing workflow with an optional keyword (enters as --topic). */
