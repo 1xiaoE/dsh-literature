@@ -3,6 +3,7 @@ import type { UiPaperSummary, UiPushStatus } from '../src/client/wire.js'
 import {
   defaultPaperId,
   formatAgentScore,
+  formatTimestamp,
   isPushActive,
   paperMetaLine,
   recentWorkflowLogs,
@@ -81,6 +82,20 @@ describe('client view model', () => {
     expect(paperMetaLine(paper)).toBe('Ada Lovelace · RA-L · 2026')
     expect(paperMetaLine({ ...paper, authors: [], venue: null })).toBe('2026')
     expect(paperMetaLine({ ...paper, authors: ['A', 'B', 'C', 'D'] })).toBe('A, B, C et al. · RA-L · 2026')
+  })
+
+  it('renders SQLite UTC timestamps in the local timezone', () => {
+    // SQLite datetime('now') is UTC ('YYYY-MM-DD HH:MM:SS'); the displayed
+    // value must match the user's clock, so the conversion is TZ-aware.
+    const utc = '2026-08-18 04:58:23'
+    const expected = new Date('2026-08-18T04:58:23Z')
+    const pad = (n: number): string => String(n).padStart(2, '0')
+    const local = `${expected.getFullYear()}-${pad(expected.getMonth() + 1)}-${pad(expected.getDate())} ${pad(expected.getHours())}:${pad(expected.getMinutes())}:${pad(expected.getSeconds())}`
+    expect(formatTimestamp(utc)).toBe(local)
+    expect(formatTimestamp(null)).toBe('')
+    expect(formatTimestamp('')).toBe('')
+    // Already-ISO input with an explicit offset is left to Date parsing.
+    expect(formatTimestamp('not-a-date')).toBe('not-a-date')
   })
 
   it('derives five workflow stages and reading numerator/denominator', () => {

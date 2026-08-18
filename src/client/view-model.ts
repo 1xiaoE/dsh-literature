@@ -22,6 +22,21 @@ export function formatAgentScore(score: number | null): string | null {
   return score === null ? null : (score * 10).toFixed(1)
 }
 
+/**
+ * SQLite `datetime('now')` timestamps are UTC ('YYYY-MM-DD HH:MM:SS').
+ * Parse as UTC and render in the browser's local timezone so the Execution
+ * panel start/finish times match the user's clock. Falls back to the raw
+ * string when it cannot be parsed.
+ */
+export function formatTimestamp(iso: string | null): string {
+  if (iso === null || iso === '') return ''
+  const text = iso.includes('T') ? iso : iso.replace(' ', 'T')
+  const date = new Date(text.endsWith('Z') ? text : `${text}Z`)
+  if (Number.isNaN(date.getTime())) return iso
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
 export function paperMetaLine(paper: Pick<UiPaperSummary, 'authors' | 'venue' | 'year'>): string {
   const authors = paper.authors.length > 3
     ? `${paper.authors.slice(0, 3).join(', ')} et al.`

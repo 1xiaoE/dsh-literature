@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { LiteratureApi } from './api.ts'
 import { t, type LiteratureKey } from './locales.ts'
 import { CSS } from './styles.ts'
-import { recentWorkflowLogs, workflowStages, type WorkflowLog, type WorkflowStageKey } from './view-model.ts'
+import { recentWorkflowLogs, workflowStages, formatTimestamp, type WorkflowLog, type WorkflowStageKey } from './view-model.ts'
 import type { UiPushStatus } from './wire.ts'
 
 interface ExecutionPanelProps {
@@ -17,10 +17,6 @@ const STAGE_LABELS: Record<WorkflowStageKey, LiteratureKey> = {
   acquisition: 'stage.acquisition',
   reading: 'stage.reading',
   report: 'stage.report',
-}
-
-function fmtTime(iso: string | null): string {
-  return iso === null ? '' : iso.replace('T', ' ').slice(0, 19)
 }
 
 function fmtMs(ms: number | null): string {
@@ -166,8 +162,8 @@ export function ExecutionPanel({ status, api }: ExecutionPanelProps) {
       <AuthCard status={status} api={api} />
       {status.present && (
         <p className={CSS.footer}>
-          {t('time.started')} {fmtTime(status.startedAt)}
-          {status.finishedAt === null ? '' : ` · ${t('time.finished')} ${fmtTime(status.finishedAt)}`}
+          {t('time.started')} {formatTimestamp(status.startedAt)}
+          {status.finishedAt === null ? '' : ` · ${t('time.finished')} ${formatTimestamp(status.finishedAt)}`}
           {` · ${t('perf.retrieval')} ${fmtMs(status.perf.retrievalMs)} · ${t('perf.ranking')} ${fmtMs(status.perf.rankingMs)} · ${t('perf.total')} ${fmtMs(status.perf.totalMs)}`}
         </p>
       )}
