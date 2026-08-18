@@ -58,13 +58,18 @@ export function Workbench({ controller: _controller }: WorkbenchProps) {
   useEffect(() => {
     let cancelled = false
     setPapersLoading(true)
-    setSelectedId(null)
-    setDetail(null)
+    // Keep the user's current selection across refreshes: reloading the list
+    // must NOT reset the selected paper to the first row (that makes actions
+    // like "enrich metadata" appear to jump to a different paper whenever the
+    // list order changes). Only fall back to the first paper when the previous
+    // selection no longer exists in the new list.
     void api.papers(activeCategory).then((result) => {
       if (cancelled) return
       const next = result.data ?? []
       setPapers(next)
-      setSelectedId(defaultPaperId(next))
+      setSelectedId((current) =>
+        current !== null && next.some((p) => p.id === current) ? current : defaultPaperId(next),
+      )
       setPaperMode(result.mode)
       setPapersLoading(false)
     })
