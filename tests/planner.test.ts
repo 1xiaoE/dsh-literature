@@ -193,6 +193,37 @@ describe('query merge + pools', () => {
     expect(new Set(recent.provenance.map((p) => p.source))).toEqual(new Set(['arxiv', 'openalex']))
   })
 
+  it('never merges distinct DOIs on title alone, even with identical titles', async () => {
+    const cfg = defaultConfig()
+    const registry = new SourceRegistry()
+    registry.register(
+      stubAdapter('arxiv', () => ({
+        id: 'doi:10.1000/conf-v1',
+        title: 'Adaptive Control of Legged Robots',
+        authors: ['Alice'],
+        doi: '10.1000/conf-v1',
+        year: 2022,
+        metadataSource: 'crossref',
+      })),
+    )
+    registry.register(
+      stubAdapter('openalex', () => ({
+        id: 'doi:10.1000/journal-ext',
+        title: 'Adaptive Control of Legged Robots',
+        authors: ['Alice'],
+        doi: '10.1000/journal-ext',
+        year: 2023,
+        metadataSource: 'openalex',
+      })),
+    )
+    const topic = cfg.topics[0]!
+    const stage = cfg.stageOrder[0]!
+    const recent = await registry.searchPool(cfg, planQueries(topic, stage, 'recent'), stage, 'recent')
+    // Conference version + journal extension share a title but have distinct
+    // DOIs → they must stay as separate papers (academic-data safety).
+    expect(recent.papers.length).toBe(2)
+  })
+
   it('recent pool is not crowded out by landmark hits', async () => {
     const cfg = defaultConfig()
     const registry = new SourceRegistry()

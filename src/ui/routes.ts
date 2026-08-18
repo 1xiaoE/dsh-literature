@@ -12,8 +12,11 @@
  * endpoints can launch agent runs, so LAN-exposed deployments must not serve
  * them.
  */
-import { createReadStream } from 'node:fs'
+import { once } from 'node:events'
+import { createReadStream, createWriteStream, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import {
   bulkRemoveRetrieved,
@@ -40,7 +43,7 @@ import {
   removePaperField,
   renameResearchField,
 } from '../lib/research_fields.js'
-import { enrichPaperMetadata, importLocalPdf } from '../lib/library_import.js'
+import { enrichPaperMetadata, importLocalPdfFromFile } from '../lib/library_import.js'
 import { startDeepRead } from '../lib/deep_read.js'
 
 /** Minimal structural WebRoute (matches @deepseek-ai/dsh-host-webserver). */
@@ -123,6 +126,56 @@ async function readBinaryBody(req: IncomingMessage, limit: number): Promise<Buff
   return Buffer.concat(chunks)
 }
 
+const PDF_MAGIC = Buffer.from('%PDF-')
+
+interface StagedUpload {
+  dir: string
+  path: string
+  sha256: string
+  reason: 'ok' | 'too_large' | 'not_pdf'
+}
+
+/**
+ * Stream an upload body to a temp file while hashing it and enforcing the
+ * size cap and %PDF- magic. Never buffers the whole file in memory. The
+ * caller owns cleanup of the returned temp dir.
+ */
+async function streamUploadToTemp(req: IncomingMessage, limit: number): Promise<StagedUpload> {
+  const { createHash } = await import('node:crypto')
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-upload-'))
+  const path = join(dir, 'upload.bin')
+  const hash = createHash('sha256')
+  let size = 0
+  let magicBytes = 0
+  const stream = createWriteStream(path, { flags: 'wx' })
+  try {
+    for await (const chunk of req) {
+      const buffer = chunk as Buffer
+      size += buffer.length
+      if (size > limit) return { dir, path, sha256: hash.digest('hex'), reason: 'too_large' }
+      // Validate the %PDF- magic incrementally over the first bytes.
+      if (magicBytes < PDF_MAGIC.length) {
+        const need = PDF_MAGIC.length - magicBytes
+        const take = Math.min(need, buffer.length)
+        if (!buffer.subarray(0, take).equals(PDF_MAGIC.subarray(magicBytes, magicBytes + take))) {
+          return { dir, path, sha256: hash.digest('hex'), reason: 'not_pdf' }
+        }
+        magicBytes += take
+      }
+      hash.update(buffer)
+      if (!stream.write(buffer)) await once(stream, 'drain')
+    }
+    if (magicBytes < PDF_MAGIC.length) return { dir, path, sha256: hash.digest('hex'), reason: 'not_pdf' }
+    await new Promise<void>((resolve2, reject) => {
+      stream.end(() => resolve2())
+      stream.on('error', reject)
+    })
+    return { dir, path, sha256: hash.digest('hex'), reason: 'ok' }
+  } finally {
+    if (!stream.closed) stream.destroy()
+  }
+}
+
 function guard(req: IncomingMessage, res: ServerResponse, method: string): boolean {
   if (!isLoopbackRequest(req)) {
     writeJson(res, 403, { error: 'forbidden: loopback-only' })
@@ -147,6 +200,16 @@ function stringField(body: Record<string, unknown>, key: string): string | undef
 function integerField(body: Record<string, unknown>, key: string): number | undefined {
   const value = body[key]
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * Decode a single captured path segment (percent-encoded paper id). The raw
+ * pathname is deliberately NOT decoded globally (see handler), so ids like
+ * `doi:10.1109/TRO.xxx` arrive as `doi%3A10.1109%2FTRO.xxx` and must be
+ * unescaped exactly once here. Malformed escapes fall back to the raw text.
+ */
+function decodeId(raw: string): string {
+  try { return decodeURIComponent(raw) } catch { return raw }
 }
 
 function categoryError(res: ServerResponse, error: unknown): void {
@@ -175,8 +238,13 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
     kind: 'prefix',
     path: '/api/dsh-literature',
     handler: async (req, res) => {
-      const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname)
+      // Keep the RAW (undecoded) pathname for route matching: paper ids such
+      // as `doi:10.1109/TRO.xxx` contain '/' and are sent percent-encoded
+      // (%2F). Decoding the whole pathname early would turn those into real
+      // slashes and break every single-segment `^/papers/([^/]+)/...` regex.
+      // Captured id segments are decoded individually via decodeId() below.
       const url = new URL(req.url ?? '/', 'http://x')
+      const pathname = url.pathname
       const rest = pathname.startsWith('/api/dsh-literature')
         ? pathname.slice('/api/dsh-literature'.length)
         : pathname
@@ -203,11 +271,25 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
           const filename = url.searchParams.get('filename') ?? ''
           const mimeType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'].split(';')[0] : undefined
           if (!filename) { err(res, 400, 'PDF_FILENAME_REQUIRED'); return }
-          const bytes = await readBinaryBody(req, maxPdfUploadBytes())
-          if (bytes === undefined) { err(res, 413, 'PDF_TOO_LARGE'); return }
+          const staged = await streamUploadToTemp(req, maxPdfUploadBytes())
+          if (staged.reason !== 'ok') {
+            rmSync(staged.dir, { recursive: true, force: true })
+            err(res, staged.reason === 'too_large' ? 413 : 400, staged.reason === 'too_large' ? 'PDF_TOO_LARGE' : 'INVALID_PDF')
+            return
+          }
           try {
-            writeJson(res, 201, await importLocalPdf(deps.getRt(), { filename, mimeType, bytes }))
-          } catch (error) { categoryError(res, error) }
+            writeJson(res, 201, await importLocalPdfFromFile(deps.getRt(), {
+              filename,
+              mimeType,
+              tempPath: staged.path,
+              sha256: staged.sha256,
+              move: true,
+            }))
+          } catch (error) {
+            categoryError(res, error)
+          } finally {
+            rmSync(staged.dir, { recursive: true, force: true })
+          }
           return
         }
         if (rest === '/categories') {
@@ -286,7 +368,7 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
             return
           }
           try {
-            assignPaperField(deps.getRt().db, paperCategoryMatch[1]!, categoryId)
+            assignPaperField(deps.getRt().db, decodeId(paperCategoryMatch[1]!), categoryId)
             writeJson(res, 200, { ok: true })
           } catch (error) { categoryError(res, error) }
           return
@@ -294,13 +376,13 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
         if (paperCategoryMatch !== null && paperCategoryMatch[2] !== undefined) {
           if (!guard(req, res, 'DELETE')) return
           try {
-            removePaperField(deps.getRt().db, paperCategoryMatch[1]!, Number(paperCategoryMatch[2]))
+            removePaperField(deps.getRt().db, decodeId(paperCategoryMatch[1]!), Number(paperCategoryMatch[2]))
             writeJson(res, 200, { ok: true })
           } catch (error) { categoryError(res, error) }
           return
         }
         if (rest.startsWith('/assets/pdf/') && guard(req, res, 'GET')) {
-          const id = rest.slice('/assets/pdf/'.length)
+          const id = decodeId(rest.slice('/assets/pdf/'.length))
           const detail = id.length > 0 ? getPaperDetail(deps.getRt().db, id) : null
           if (detail?.pdfPath === null || detail === null) {
             err(res, 404, 'PDF_NOT_AVAILABLE')
@@ -310,7 +392,7 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
           return
         }
         if (rest.startsWith('/assets/report/') && guard(req, res, 'GET')) {
-          const id = rest.slice('/assets/report/'.length)
+          const id = decodeId(rest.slice('/assets/report/'.length))
           const detail = id.length > 0 ? getPaperDetail(deps.getRt().db, id) : null
           if (detail?.reportPath === null || detail === null) {
             err(res, 404, 'REPORT_NOT_AVAILABLE')
@@ -322,22 +404,23 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
         const enrichMatch = /^\/papers\/([^/]+)\/enrich-metadata$/.exec(rest)
         if (enrichMatch !== null) {
           if (!guard(req, res, 'POST')) return
-          try { writeJson(res, 200, await enrichPaperMetadata(deps.getRt(), enrichMatch[1]!)) } catch (error) { categoryError(res, error) }
+          try { writeJson(res, 200, await enrichPaperMetadata(deps.getRt(), decodeId(enrichMatch[1]!))) } catch (error) { categoryError(res, error) }
           return
         }
         const deepReadMatch = /^\/papers\/([^/]+)\/deep-read$/.exec(rest)
         if (deepReadMatch !== null) {
           if (!guard(req, res, 'POST')) return
-          const result = startDeepRead(deps.getRt(), deepReadMatch[1]!)
+          const paperId = decodeId(deepReadMatch[1]!)
+          const result = startDeepRead(deps.getRt(), paperId)
           if (!result.started) { err(res, result.errorCode === 'ALREADY_RUNNING' || result.errorCode === 'ALREADY_COMPLETE' ? 409 : 404, result.errorCode ?? 'DEEP_READ_NOT_AVAILABLE'); return }
-          writeJson(res, 202, { ok: true, paperId: deepReadMatch[1]!, status: 'running' })
+          writeJson(res, 202, { ok: true, paperId, status: 'running' })
           return
         }
         const favoriteMatch = /^\/papers\/([^/]+)\/favorite$/.exec(rest)
         if (favoriteMatch !== null) {
           if (!guard(req, res, 'POST')) return
           try {
-            const result = setPaperFavorite(deps.getRt().db, favoriteMatch[1]!)
+            const result = setPaperFavorite(deps.getRt().db, decodeId(favoriteMatch[1]!))
             writeJson(res, 200, result)
           } catch (error) { categoryError(res, error) }
           return
@@ -346,7 +429,7 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
         if (retrievedMatch !== null) {
           if (!guard(req, res, 'DELETE')) return
           try {
-            writeJson(res, 200, removeRetrieved(deps.getRt().db, retrievedMatch[1]!))
+            writeJson(res, 200, removeRetrieved(deps.getRt().db, decodeId(retrievedMatch[1]!)))
           } catch (error) { categoryError(res, error) }
           return
         }
@@ -364,7 +447,7 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
         }
         if (rest.startsWith('/papers/') && guard(req, res, 'GET')) {
           const rt = deps.getRt()
-          const id = rest.slice('/papers/'.length)
+          const id = decodeId(rest.slice('/papers/'.length))
           if (id.length === 0) {
             err(res, 400, 'missing paper id')
             return

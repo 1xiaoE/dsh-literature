@@ -58,6 +58,74 @@ describe('local PDF import', () => {
     }
   })
 
+  it('duplicate import reports the paper truthfully read/report status, never fixed unread/none', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-import-'))
+    const rt = createRuntime(normalizeConfig({ dataDir: dir }))
+    try {
+      const input = { filename: 'read.pdf', mimeType: 'application/pdf', bytes: pdf(`Read Again\nAbstract\n${'full text '.repeat(60)}`), enrich: false }
+      const imported = await importLocalPdf(rt, input)
+      expect(imported.readStatus).toBe('unread')
+      expect(imported.reportStatus).toBe('none')
+      // Simulate a completed deep read on the existing paper.
+      rt.db.prepare("INSERT INTO fulltexts (paper_id,status,parser,char_count,chunk_count) VALUES (?, 'ok','test',500,2)").run(imported.paperId)
+      rt.db.prepare('INSERT INTO fulltext_chunks (paper_id,seq,section,char_start,char_end,content) VALUES (?,0,?,0,250,?)').run(imported.paperId, 'Abstract', 'evidence')
+      rt.db.prepare('INSERT INTO fulltext_chunks (paper_id,seq,section,char_start,char_end,content) VALUES (?,1,?,250,500,?)').run(imported.paperId, 'Method', 'evidence')
+      await runDeepRead(rt, imported.paperId)
+      // Re-importing the same bytes must reflect the real read/report state.
+      const duplicate = await importLocalPdf(rt, input)
+      expect(duplicate.duplicateDetected).toBe(true)
+      expect(duplicate.readStatus).toBe('read')
+      expect(duplicate.reportStatus).toBe('available')
+    } finally {
+      rt.db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not mark a paper enriched when the provider lookup fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-import-'))
+    const rt = createRuntime(normalizeConfig({ dataDir: dir }))
+    try {
+      // enrich: true with a registry that cannot resolve anything — the import
+      // must remain valid but the enriched flag must stay false.
+      const result = await importLocalPdf(rt, {
+        filename: 'unresolvable.pdf', mimeType: 'application/pdf',
+        bytes: pdf(`Unresolvable Local Paper\nAbstract\n${'unknown topic words '.repeat(20)}`),
+        enrich: true,
+      })
+      expect(result.metadataStatus.enriched).toBe(false)
+      const row = rt.db.prepare('SELECT metadata_enriched_at FROM papers WHERE id = ?').get(result.paperId) as { metadata_enriched_at: string | null }
+      expect(row.metadata_enriched_at).toBeNull()
+      expect(result.metadataStatus.complete).toBe(false) // no authors parsed yet
+    } finally {
+      rt.db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a serialized empty author array as missing authors (metadata incomplete)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-import-'))
+    const rt = createRuntime(normalizeConfig({ dataDir: dir }))
+    try {
+      rt.db.prepare(
+        `INSERT INTO papers (id,title,authors,venue,year,doi,metadata_source)
+         VALUES ('paper:no-authors','Title Only','[]','Venue',2026,NULL,'test')`,
+      ).run()
+      const duplicate = await importLocalPdf(rt, {
+        filename: 'no-authors.pdf', mimeType: 'application/pdf',
+        bytes: pdf(`Title Only\nAbstract\n${'text '.repeat(30)}`),
+        enrich: false,
+      })
+      // "[]" is not an author list: metadata must be reported incomplete and
+      // the enriched flag must be false.
+      expect(duplicate.metadataStatus.complete).toBe(false)
+      expect(duplicate.metadataStatus.enriched).toBe(false)
+    } finally {
+      rt.db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('rejects non-PDF bytes before SQLite or managed storage writes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-import-'))
     const rt = createRuntime(normalizeConfig({ dataDir: dir }))

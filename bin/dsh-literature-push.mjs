@@ -24,12 +24,46 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = join(fileURLToPath(new URL('..', import.meta.url)))
-const HARNESS =
-  process.env.DSH_HARNESS_DIR ?? '/home/eternal/deepseek-harness'
 const HEADLESS_PROFILE = join(homedir(), '.dsh', 'profiles', 'headless')
 
+/**
+ * Discover the DeepSeek Harness checkout without hardcoding a personal path:
+ *  1. $DSH_HARNESS_DIR wins when set;
+ *  2. `dsh` on $PATH → its parent repo (bin/dsh lives inside the harness repo);
+ *  3. `dsh` CLI resolves to a symlink (global install) → resolve to the repo;
+ *  4. common repo locations (~/deepseek-harness, ~/dsh, $XDG checkout) as a
+ *     last resort for interactive convenience;
+ *  5. explicit --harness always overrides everything.
+ */
+function discoverHarness(flagValue) {
+  if (flagValue) return flagValue
+  if (process.env.DSH_HARNESS_DIR) return process.env.DSH_HARNESS_DIR
+  const which = (cmd) => {
+    try {
+      const r = spawnSync('which', [cmd], { encoding: 'utf8' })
+      return r.status === 0 ? r.stdout.trim() : null
+    } catch { return null }
+  }
+  const binPath = which('dsh')
+  if (binPath) {
+    const resolved = (() => {
+      try {
+        const r = spawnSync('readlink', ['-f', binPath], { encoding: 'utf8' })
+        return r.status === 0 ? r.stdout.trim() : binPath
+      } catch { return binPath }
+    })()
+    // bin/dsh lives at the harness repo root; walk up one level.
+    const candidate = join(resolved, '..')
+    if (existsSync(join(candidate, 'package.json'))) return candidate
+  }
+  for (const dir of [join(homedir(), 'deepseek-harness'), join(homedir(), 'dsh'), join(homedir(), 'work', 'deepseek-harness')]) {
+    if (existsSync(join(dir, 'package.json'))) return dir
+  }
+  return null
+}
+
 function parseArgs(argv) {
-  const out = { topic: undefined, install: false, harness: HARNESS, resume: undefined }
+  const out = { topic: undefined, install: false, harness: undefined, resume: undefined }
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]
     if (a === '--topic') out.topic = argv[++i]
@@ -42,7 +76,7 @@ function parseArgs(argv) {
           '  --topic <topic>   override topic\n' +
           '  --resume <pushId> continue a parked/interrupted push from its original step\n' +
           '  --install         ensure plugin installed in the headless profile first\n' +
-          '  --harness <dir>   dsh harness repo (default: ' + HARNESS + ')',
+          '  --harness <dir>   dsh harness repo (default: $DSH_HARNESS_DIR, then `dsh` on PATH)',
       )
       process.exit(0)
     }
@@ -118,8 +152,12 @@ function buildResumePrompt(pushId) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
-  if (!existsSync(join(args.harness, 'apps', 'cli', 'src', 'bin.ts'))) {
-    console.error(`[dsh-literature] harness not found at ${args.harness} (use --harness or DSH_HARNESS_DIR)`)
+  args.harness = discoverHarness(args.harness)
+  if (!args.harness || !existsSync(join(args.harness, 'apps', 'cli', 'src', 'bin.ts'))) {
+    console.error(
+      '[dsh-literature] DeepSeek Harness checkout not found.\n' +
+        '  Provide it with --harness <dir> or set DSH_HARNESS_DIR, or ensure the `dsh` CLI is on $PATH.',
+    )
     process.exit(2)
   }
 

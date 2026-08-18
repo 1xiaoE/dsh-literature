@@ -81,8 +81,11 @@ function combine(a: PaperRef, b: PaperRef): PaperRef {
 /**
  * Two-pass dedup:
  * 1. strong identifiers (doi/arxiv/openalex);
- * 2. normalized title — records with the same title but different strong
- *    identifiers are merged (identifiers combined, richer metadata wins).
+ * 2. normalized title — but only when the records are genuinely the same
+ *    work. Two records with DIFFERENT strong ids (e.g. distinct DOIs) are
+ *    never merged on title alone: conference papers, journal extensions,
+ *    preprints and unrelated papers can share identical titles. Title-level
+ *    merging additionally requires author overlap AND year proximity.
  */
 export function mergePapers(papers: PaperRef[]): PaperRef[] {
   const byId = new Map<string, PaperRef>()
@@ -93,15 +96,24 @@ export function mergePapers(papers: PaperRef[]): PaperRef[] {
     if (!ex || rankPaper(p) > rankPaper(ex)) byId.set(k, p)
   }
   const survivors = [...byId.values(), ...papers.filter((p) => !dedupKeyOf(p))]
-  const byTitle = new Map<string, PaperRef[]>()
-  for (const p of survivors) {
-    const t = normalizeTitle(p.title)
-    const list = byTitle.get(t) ?? []
-    list.push(p)
-    byTitle.set(t, list)
-  }
   const out: PaperRef[] = []
-  for (const list of byTitle.values()) {
+  const grouped = new Map<string, PaperRef[]>()
+  for (const p of survivors) {
+    // Find the group whose representative is title-mergeable with p
+    // (same normalized title, no conflicting strong ids, author overlap +
+    // year proximity). Do not naively bucket by normalized title alone —
+    // a title collision between genuinely different works must stay apart.
+    let groupKey: string | undefined
+    for (const [key, members] of grouped) {
+      if (members.some((m) => titleMergeable(m, p))) { groupKey = key; break }
+    }
+    if (groupKey === undefined) {
+      groupKey = dedupKeyOf(p) ?? `title:${normalizeTitle(p.title)}`
+      grouped.set(groupKey, [])
+    }
+    grouped.get(groupKey)!.push(p)
+  }
+  for (const list of grouped.values()) {
     let rep = list[0]!
     for (const other of list.slice(1)) {
       rep = rankPaper(other) > rankPaper(rep) ? other : rep
@@ -113,12 +125,42 @@ export function mergePapers(papers: PaperRef[]): PaperRef[] {
   return out
 }
 
-/** Whether two records refer to the same paper (identifier or title match). */
+function authorOverlap(a: PaperRef, b: PaperRef): boolean {
+  const names = new Set(a.authors.map((author) => normalizeTitle(author)))
+  return b.authors.some((author) => names.has(normalizeTitle(author)))
+}
+
+function yearProximity(a: PaperRef, b: PaperRef, window = 2): boolean {
+  if (a.year === undefined || b.year === undefined) return false
+  return Math.abs(a.year - b.year) <= window
+}
+
+/**
+ * Academic-data-safe title merge predicate. Same normalized title is NOT
+ * enough: two records that BOTH carry a strong id of the same kind but with
+ * different values (e.g. two distinct DOIs) are different works and never
+ * merge. A preprint (arXiv id) and its published version (DOI) do not
+ * conflict — author overlap + year proximity corroborate the merge.
+ */
+export function titleMergeable(a: PaperRef, b: PaperRef): boolean {
+  if (normalizeTitle(a.title) !== normalizeTitle(b.title)) return false
+  if (conflictingStrongId(a.doi, b.doi)) return false
+  if (conflictingStrongId(a.arxivId, b.arxivId)) return false
+  if (conflictingStrongId(a.openalexId, b.openalexId)) return false
+  return authorOverlap(a, b) && yearProximity(a, b)
+}
+
+/** Both records claim the same id kind but disagree → different works. */
+function conflictingStrongId(a: string | undefined, b: string | undefined): boolean {
+  return a !== undefined && b !== undefined && a.toLowerCase() !== b.toLowerCase()
+}
+
+/** Whether two records refer to the same paper (identifier or safe title match). */
 export function samePaper(a: PaperRef, b: PaperRef): boolean {
   const ka = dedupKeyOf(a)
   const kb = dedupKeyOf(b)
   if (ka && kb && ka === kb) return true
-  return normalizeTitle(a.title) === normalizeTitle(b.title)
+  return titleMergeable(a, b)
 }
 
 /**

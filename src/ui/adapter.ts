@@ -20,9 +20,9 @@ import type { LiteratureRuntime } from '../lib/runtime.js'
 import { expandHome } from '../lib/paths.js'
 import { listPaperFields, listResearchFields } from '../lib/research_fields.js'
 import { libraryPaperExistsSql } from '../lib/library.js'
+import { RunnerService } from '../lib/runner_service.js'
 import {
   isPaperFavorite,
-  isLibraryPaper,
   removeRetrievedBatch,
   removeRetrievedRecordSafely,
   togglePaperFavorite,
@@ -91,7 +91,8 @@ const PAPER_SUMMARY_COLUMNS = `
   (SELECT pu.report_path FROM pushes pu WHERE pu.paper_id = p.id AND pu.report_path IS NOT NULL AND pu.report_path <> '' ORDER BY pu.id DESC LIMIT 1) AS report_path,
   (SELECT MAX(pu.id) FROM pushes pu WHERE pu.paper_id = p.id AND pu.report_path IS NOT NULL AND pu.report_path <> '') AS report_push_id,
   (SELECT topic FROM candidates c JOIN pushes pu ON pu.id = c.push_id WHERE c.paper_id = p.id ORDER BY pu.id DESC LIMIT 1) AS topic,
-  p.is_favorite
+  p.is_favorite,
+  ${libraryPaperExistsSql('p')} AS is_library
 `
 
 interface PaperRow extends Record<string, unknown> {
@@ -116,6 +117,7 @@ interface PaperRow extends Record<string, unknown> {
   fulltext_chunks: number | null
   reading_status: 'running' | 'completed' | 'failed' | null
   is_favorite: number | null
+  is_library: number | null
 }
 
 function usableFile(path: string | null): string | null {
@@ -237,17 +239,23 @@ function toSummary(db: Db, row: PaperRow, pdfPath: string | null = usableFile(ro
     topic: row.topic,
     createdAt: row.created_at,
     favorite: row.is_favorite === 1,
-    isLibrary: isLibraryPaper(db, row.id),
+    // Precomputed in the shared projection (one correlated EXISTS, no N+1
+    // per-paper isLibraryPaper() calls in the hot list path).
+    isLibrary: row.is_library === 1,
   }
 }
 
 export interface PapersFilter {
   /** category id from listCategories(): workflow id | 'field:<id>' | 'topic:<name>' */
   category?: string
+  /** Server-side pagination: max rows returned (default 500). */
+  limit?: number
+  /** Server-side pagination: row offset (default 0). */
+  offset?: number
 }
 
-/** List paper summaries with an optional category filter. */
-export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] {
+/** Resolve the category branch into a reusable WHERE clause for p/count. */
+function papersWhere(db: Db, filter: PapersFilter): { where: string[]; params: string[] } {
   const where: string[] = []
   const params: string[] = []
   const category = filter.category ?? 'all'
@@ -257,7 +265,11 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
   } else if (category === 'selected') {
     where.push("EXISTS (SELECT 1 FROM candidates c WHERE c.paper_id = p.id AND c.selection_outcome = 'SELECTED')")
   } else if (category === 'to-read') {
-    where.push("EXISTS (SELECT 1 FROM fetch_log f WHERE f.paper_id = p.id AND f.outcome IN ('ok','PDF_OK') AND f.pdf_path IS NOT NULL)")
+    where.push(`EXISTS (SELECT 1 FROM fetch_log f WHERE f.paper_id = p.id AND f.outcome IN ('ok','PDF_OK') AND f.pdf_path IS NOT NULL)
+      AND NOT (
+        EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id = p.id AND ft.status = 'ok' AND (SELECT COUNT(DISTINCT r.seq) FROM fulltext_reads r WHERE r.paper_id = p.id) >= ft.chunk_count)
+        OR (NOT EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id = p.id) AND EXISTS (SELECT 1 FROM fulltext_reads r WHERE r.paper_id = p.id))
+      )`)
   } else if (category === 'read') {
     where.push("(EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id=p.id AND ft.status='ok' AND (SELECT COUNT(DISTINCT r.seq) FROM fulltext_reads r WHERE r.paper_id=p.id) >= ft.chunk_count) OR (NOT EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id=p.id) AND EXISTS (SELECT 1 FROM fulltext_reads r WHERE r.paper_id=p.id)))")
   } else if (category === 'reports') {
@@ -281,6 +293,24 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
       where.push('1 = 0')
     }
   }
+  return { where, params }
+}
+
+/** Exact count of papers matching the filter (used by category badges). */
+export function countPapers(db: Db, filter: PapersFilter = {}): number {
+  const { where, params } = papersWhere(db, filter)
+  const sql = `SELECT COUNT(*) AS n FROM papers p
+    ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}`
+  const row = db.prepare(sql).get(...params) as { n: number }
+  return row.n
+}
+
+/** List paper summaries with an optional category filter. */
+export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] {
+  const { where, params } = papersWhere(db, filter)
+  const category = filter.category ?? 'all'
+  const limit = filter.limit ?? 500
+  const offset = filter.offset ?? 0
 
   const orderBy = category === 'selected'
     ? 'selected_push_id DESC, p.created_at DESC'
@@ -292,8 +322,8 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
   const sql = `SELECT ${PAPER_SUMMARY_COLUMNS} FROM papers p
     ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY ${orderBy}
-    LIMIT 500`
-  const rows = db.prepare(sql).all(...params) as unknown as PaperRow[]
+    LIMIT ? OFFSET ?`
+  const rows = db.prepare(sql).all(...params, limit, offset) as unknown as PaperRow[]
   const assets = usableAssetsForPapers(db, rows.map((row) => row.id))
   const papers = rows.map((row) => {
     const fetch = assets.pdf.get(row.id)
@@ -306,9 +336,7 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
       .sort((a, b) => b.reportPushId - a.reportPushId)
       .map(({ paper }) => paper)
   }
-  return (category === 'to-read'
-    ? papers.filter(({ paper }) => paper.hasPdf && (paper.readCoverage === null || paper.readCoverage === undefined || paper.readCoverage < 1))
-    : papers).map(({ paper }) => paper)
+  return papers.map(({ paper }) => paper)
 }
 
 /** Full detail for the right-hand panel (fields exist → mapped; missing → null). */
@@ -397,7 +425,8 @@ export function listCategories(db: Db): UiCategory[] {
       : w.id === 'selected'
         ? scalarCount("SELECT COUNT(DISTINCT paper_id) AS n FROM candidates WHERE selection_outcome = 'SELECTED'")
         : w.id === 'to-read'
-          ? listPapers(db).filter((paper) => paper.hasPdf && (paper.readCoverage === null || paper.readCoverage === undefined || paper.readCoverage < 1)).length
+          // SQL aggregate over the whole table — never the 500-row list cap.
+          ? countPapers(db, { category: 'to-read' })
         : w.id === 'read'
           ? scalarCount("SELECT COUNT(DISTINCT r.paper_id) AS n FROM fulltext_reads r WHERE NOT EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id=r.paper_id) OR EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id=r.paper_id AND ft.status='ok' AND (SELECT COUNT(DISTINCT r2.seq) FROM fulltext_reads r2 WHERE r2.paper_id=ft.paper_id) >= ft.chunk_count)")
         : w.id === 'reports'
@@ -789,7 +818,17 @@ export function resumeCliArgs(pushId: number): string[] {
 /** True when SQLite already has a workflow that must finish or be resumed. */
 export function workflowAlreadyRunning(db: Db): boolean {
   const latest = db.prepare('SELECT status FROM pushes ORDER BY id DESC LIMIT 1').get() as { status: string } | undefined
-  return latest !== undefined && ['running', 'auth_required', 'user_action_required'].includes(latest.status)
+  if (latest !== undefined && ['running', 'auth_required', 'user_action_required'].includes(latest.status)) return true
+  // A live runner job (fresh heartbeat) also counts as running, even before
+  // the CLI has persisted any push row.
+  const job = db.prepare(
+    `SELECT status, heartbeat_at FROM runner_jobs ORDER BY run_id DESC LIMIT 1`,
+  ).get() as { status: string; heartbeat_at: string } | undefined
+  if (job !== undefined && job.status === 'running') {
+    const last = Date.parse(`${job.heartbeat_at.replace(' ', 'T')}Z`)
+    if (!Number.isNaN(last) && Date.now() - last < STALE_RUNNING_MS) return true
+  }
+  return false
 }
 
 /** Resume only the parked push that still has persisted user work to resolve. */
@@ -962,21 +1001,35 @@ function workflowLogDir(rt: LiteratureRuntime | undefined): string | null {
   return rt !== undefined ? join(rt.dataDir, 'runs') : null
 }
 
-/** Spawn the existing workflow CLI with log capture + early-exit detection. */
-async function spawnCli(args: string[], rt?: LiteratureRuntime): Promise<UiRunResult> {
+/**
+ * Spawn the existing workflow CLI through the RunnerService: it persists a
+ * runner_jobs row (runId/kind/pushId/pid/status/heartbeat/logPath) so the
+ * Execution panel reads the live job instead of inferring the phase from
+ * retrieval rows, and it keeps the double-launch guard.
+ */
+async function spawnCli(args: string[], rt?: LiteratureRuntime, kind: 'push' | 'resume' = 'push', pushId?: number | null): Promise<UiRunResult> {
+  const service = runnerServiceFor(rt)
   // Launch through node explicitly: the .mjs ships without the execute bit
   // (mode 600), so exec'ing it directly fails with EACCES.
-  return runCli(process.execPath, [pushCliPath(), ...args], { logDir: workflowLogDir(rt), flag: workflowFlag })
+  const out = await service.start(kind, args, { bin: process.execPath, pushId: pushId ?? null })
+  // Keep the legacy guard in sync for any caller that still reads it.
+  if (out.ok) workflowFlag.active = true
+  return { ok: out.ok, pid: out.pid, logPath: out.logPath, message: out.message }
+}
+
+/** One RunnerService per runtime (cheap; rows are the durable source). */
+function runnerServiceFor(rt: LiteratureRuntime | undefined): RunnerService {
+  return new RunnerService(rt?.db as unknown as Db, { dataDir: rt?.dataDir ?? null })
 }
 
 /** Run the existing workflow with an optional keyword (enters as --topic). */
 export function startPush(keyword: string, rt?: LiteratureRuntime): Promise<UiRunResult> {
-  return spawnCli(pushCliArgs(keyword), rt)
+  return spawnCli(pushCliArgs(keyword), rt, 'push', null)
 }
 
 /** Resume a parked push (AUTH_REQUIRED / NEED_USER_ACTION / interrupted). */
 export function startResume(pushId: number, rt?: LiteratureRuntime): Promise<UiRunResult> {
-  return spawnCli(resumeCliArgs(pushId), rt)
+  return spawnCli(resumeCliArgs(pushId), rt, 'resume', pushId)
 }
 
 /**
@@ -984,14 +1037,5 @@ export function startResume(pushId: number, rt?: LiteratureRuntime): Promise<UiR
  * run has been captured yet.
  */
 export function latestRunnerLog(rt: LiteratureRuntime | undefined): { path: string; content: string } | null {
-  const logDir = workflowLogDir(rt)
-  if (logDir === null || !existsSync(logDir)) return null
-  const files = readdirSync(logDir)
-    .filter((name) => name.startsWith('runner-') && name.endsWith('.log'))
-    .map((name) => ({ name, mtime: statSync(join(logDir, name)).mtimeMs }))
-    .sort((a, b) => b.mtime - a.mtime)
-  const newest = files[0]
-  if (newest === undefined) return null
-  const path = join(logDir, newest.name)
-  return { path, content: readFileSync(path, 'utf8').slice(-LOG_SERVE_CHARS) }
+  return runnerServiceFor(rt).latestLog(LOG_SERVE_CHARS)
 }

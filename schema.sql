@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS papers (
   arxiv_id         TEXT,
   openalex_id      TEXT,
   url              TEXT,
+  oa_pdf_url       TEXT,                            -- landing page URL is NOT a fulltext signal
   abstract         TEXT,
   citations        INTEGER,
   bibtex           TEXT,
@@ -222,15 +223,19 @@ CREATE TABLE IF NOT EXISTS paper_categories (
 );
 CREATE INDEX IF NOT EXISTS idx_paper_categories_category ON paper_categories(category_id, state);
 
--- Canonical reports are shared by workflow and explicit paper deep reads;
+-- Report version history: a paper may hold multiple report versions (deep
+-- read / workflow re-run / model or prompt comparisons); id orders them.
 -- `pushes.report_path` remains supported for legacy workflow provenance.
 CREATE TABLE IF NOT EXISTS reports (
-  paper_id    TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  paper_id    TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
   report_path TEXT NOT NULL,
   source      TEXT NOT NULL CHECK (source IN ('workflow','deep_read')),
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE INDEX IF NOT EXISTS idx_reports_paper ON reports(paper_id);
+CREATE INDEX IF NOT EXISTS idx_reports_paper_created ON reports(paper_id, created_at);
 CREATE TABLE IF NOT EXISTS paper_reading_jobs (
   paper_id    TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
   status      TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
@@ -243,4 +248,42 @@ CREATE TABLE IF NOT EXISTS paper_reading_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_paper_reading_jobs_status ON paper_reading_jobs(status);
 
-PRAGMA user_version = 18;
+-- Query hot-path indexes: every list/count/rank read touches these columns.
+-- (Created after all tables, so schema.sql executes linearly on an empty DB.)
+CREATE INDEX IF NOT EXISTS idx_candidates_paper ON candidates(paper_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_push ON candidates(push_id);
+CREATE INDEX IF NOT EXISTS idx_candidates_selection ON candidates(push_id, selection_outcome);
+CREATE INDEX IF NOT EXISTS idx_candidates_rank ON candidates(push_id, agent_rank) WHERE agent_rank IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_retrievals_paper ON retrievals(paper_id);
+CREATE INDEX IF NOT EXISTS idx_retrievals_push ON retrievals(push_id);
+CREATE INDEX IF NOT EXISTS idx_fetch_log_paper ON fetch_log(paper_id);
+CREATE INDEX IF NOT EXISTS idx_fetch_log_sha ON fetch_log(sha256) WHERE sha256 IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_fulltext_reads_paper ON fulltext_reads(paper_id);
+CREATE INDEX IF NOT EXISTS idx_fulltext_reads_seq ON fulltext_reads(paper_id, seq);
+CREATE INDEX IF NOT EXISTS idx_reports_paper ON reports(paper_id);
+
+-- Hard invariants of the Quality-First state machine, enforced by SQLite:
+-- (1) one push may SELECT at most one paper; (2) agent ranks within a push
+-- are unique (no two candidates claim the same rank).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_candidates_selected ON candidates(push_id)
+  WHERE selection_outcome = 'SELECTED';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_candidates_agent_rank ON candidates(push_id, agent_rank)
+  WHERE agent_rank IS NOT NULL;
+
+-- Runner jobs: Web UI → child-process lifecycle ledger (Run/Resume spawn rows).
+CREATE TABLE IF NOT EXISTS runner_jobs (
+  run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind         TEXT NOT NULL CHECK (kind IN ('push','resume')),
+  push_id      INTEGER,
+  pid          INTEGER,
+  status       TEXT NOT NULL CHECK (status IN ('running','exited','failed')),
+  started_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  heartbeat_at TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at  TEXT,
+  exit_code    INTEGER,
+  log_path     TEXT,
+  message      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runner_jobs_status ON runner_jobs(status);
+
+PRAGMA user_version = 21;

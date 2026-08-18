@@ -98,8 +98,7 @@ export async function runDeepRead(rt: LiteratureRuntime, paperId: string): Promi
     const reportPath = await writeReportAtomic(resolveLibraryRoot(rt.cfg), 'Imported Papers', safeReportName(paper.title, paperId), content)
     rt.db.prepare(
       `INSERT INTO reports (paper_id,report_path,source,created_at,updated_at)
-       VALUES (?, ?, 'deep_read', datetime('now'), datetime('now'))
-       ON CONFLICT(paper_id) DO UPDATE SET report_path=excluded.report_path,source='deep_read',updated_at=excluded.updated_at`,
+       VALUES (?, ?, 'deep_read', datetime('now'), datetime('now'))`,
     ).run(paperId, reportPath)
     rt.db.prepare("UPDATE paper_reading_jobs SET status='completed', read_chunks=?, total_chunks=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE paper_id=?").run(total, total, paperId)
   } catch (error) {

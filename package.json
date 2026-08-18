@@ -44,7 +44,9 @@
     "bundle": "tsdown",
     "watch": "tsdown --watch",
     "test": "vitest run",
-    "push": "node bin/dsh-literature-push.mjs"
+    "push": "node bin/dsh-literature-push.mjs",
+    "prepare": "node -e \"if (process.env.DSH_LIT_SKIP_PREPARE !== '1') { const { spawnSync } = require('node:child_process'); spawnSync('pnpm', ['build'], { stdio: 'inherit' }); }\"",
+    "prepack": "pnpm build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

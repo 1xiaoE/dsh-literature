@@ -43,9 +43,12 @@ topic → 检索（Recent + Landmark）→ 去重 → 预排序（Top 15）
 ```sh
 git clone https://github.com/1xiaoE/dsh-literature.git
 cd dsh-literature
-pnpm install
+pnpm install      # `prepare` 自动执行 pnpm build；可用 DSH_LIT_SKIP_PREPARE=1 跳过
+pnpm build        # 显式构建（tsc → lib/ + 客户端 bundle）——link 前必须执行
 dsh plugin --profile web add link:/path/to/dsh-literature
 ```
+
+仓库只提交源码（`lib/` 被 git 忽略），全新 clone 必须先构建才能加载插件。`prepare`/`prepack` 会在安装/打包时为消费者自动构建；`pnpm build` 随时可再跑。
 
 ## 配置
 

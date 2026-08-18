@@ -98,10 +98,10 @@ export function defineLiteratureReportWrite(getRt: () => LiteratureRuntime) {
         rt.db.prepare('UPDATE pushes SET report_path = ? WHERE id = ?').run(reportPath, args.pushId)
         const push = rt.db.prepare('SELECT paper_id FROM pushes WHERE id = ?').get(args.pushId) as { paper_id: string | null } | undefined
         if (push?.paper_id) {
+          // Version history: append a new report row instead of overwriting.
           rt.db.prepare(
             `INSERT INTO reports (paper_id,report_path,source,created_at,updated_at)
-             VALUES (?, ?, 'workflow', datetime('now'), datetime('now'))
-             ON CONFLICT(paper_id) DO UPDATE SET report_path=excluded.report_path,source='workflow',updated_at=excluded.updated_at`,
+             VALUES (?, ?, 'workflow', datetime('now'), datetime('now'))`,
           ).run(push.paper_id, reportPath)
         }
         return jsonSafe({ ok: true, reportPath, bytes: info.size })

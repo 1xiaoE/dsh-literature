@@ -212,4 +212,71 @@ describe('UI routes', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('routes DOI-style paper ids containing "/" (percent-encoded) on every write API', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const doiId = 'doi:10.1109/TRO.2024.1234567'
+      seedPaper(db, doiId)
+      // GET detail must decode the id back to the DOI form.
+      const detail = await invoke(db, request('GET', `/api/dsh-literature/papers/${encodeURIComponent(doiId)}`))
+      expect(detail.status).toBe(200)
+      expect((JSON.parse(detail.text()) as { id: string }).id).toBe(doiId)
+
+      // Category assignment.
+      const created = await invoke(db, request('POST', '/api/dsh-literature/categories', JSON.stringify({ nameEn: 'State Estimation', nameZh: '状态估计' })))
+      expect(created.status).toBe(201)
+      const field = JSON.parse(created.text()) as { id: number }
+      const assigned = await invoke(db, request('POST', `/api/dsh-literature/papers/${encodeURIComponent(doiId)}/categories`, JSON.stringify({ categoryId: field.id })))
+      expect(assigned.status).toBe(200)
+
+      // Enrich metadata (reports success without a network hit in tests).
+      const enriched = await invoke(db, request('POST', `/api/dsh-literature/papers/${encodeURIComponent(doiId)}/enrich-metadata`))
+      expect(enriched.status).toBe(200)
+
+      // Favorite toggle.
+      const fav = await invoke(db, request('POST', `/api/dsh-literature/papers/${encodeURIComponent(doiId)}/favorite`))
+      expect(fav.status).toBe(200)
+      expect((JSON.parse(fav.text()) as { favorite: boolean }).favorite).toBe(true)
+
+      // Deep read starts (no real PDF → 404 with DEEP_READ_NOT_AVAILABLE proves
+      // the route matched; a 404 for the wrong reason would be a routing bug).
+      const deep = await invoke(db, request('POST', `/api/dsh-literature/papers/${encodeURIComponent(doiId)}/deep-read`))
+      expect([404, 202]).toContain(deep.status)
+
+      // Retrieved removal keeps the library paper (favorite protects it).
+      const removed = await invoke(db, request('DELETE', `/api/dsh-literature/retrieved/${encodeURIComponent(doiId)}`))
+      expect(removed.status).toBe(200)
+      const removedBody = JSON.parse(removed.text()) as { protectedLibrary: boolean; removedRetrieved: boolean }
+      expect(removedBody.protectedLibrary).toBe(true)
+      expect(removedBody.removedRetrieved).toBe(false) // no retrieval history seeded
+
+      // Category relation survived the removal.
+      const detailAfter = await invoke(db, request('GET', `/api/dsh-literature/papers/${encodeURIComponent(doiId)}`))
+      const after = JSON.parse(detailAfter.text()) as { researchFields: Array<{ id: number }> }
+      expect(after.researchFields.map((f) => f.id)).toContain(field.id)
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('routes DOI-style paper ids with a real PDF through the asset endpoints', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const doiId = 'doi:10.1109/LRA.2023.9988776'
+      seedPaper(db, doiId)
+      const pdf = join(dir, 'doi-asset.pdf')
+      writeFileSync(pdf, '%PDF-1.4 doi route')
+      db.prepare(`INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path) VALUES (?, '[]', 'PDF_OK', ?)`).run(doiId, pdf)
+      const pdfResponse = await invoke(db, request('GET', `/api/dsh-literature/assets/pdf/${encodeURIComponent(doiId)}`))
+      expect(pdfResponse.status).toBe(200)
+      expect(pdfResponse.text()).toBe('%PDF-1.4 doi route')
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

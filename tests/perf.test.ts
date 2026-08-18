@@ -224,7 +224,7 @@ describe('v10 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v10-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(18)
+    expect(version.user_version).toBe(21)
     const cols = (db.prepare('PRAGMA table_info(pushes)').all() as Array<{ name: string }>).map((c) => c.name)
     for (const c of ['retrieval_ms', 'deterministic_ranking_ms', 'agent_ranking_ms', 'pdf_preflight_ms', 'pdf_download_ms', 'parsing_ms', 'fulltext_read_ms', 'report_generation_ms', 'total_ms', 'raw_candidates', 'deterministic_candidates', 'agent_scored_candidates', 'llm_call_count', 'llm_retry_count', 'pdf_attempt_count']) {
       expect(cols, c).toContain(c)

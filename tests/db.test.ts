@@ -22,7 +22,7 @@ describe('sqlite migration', () => {
     migrate(db)
     migrate(db)
     const row = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(row.user_version).toBe(18)
+    expect(row.user_version).toBe(21)
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>
@@ -60,6 +60,56 @@ describe('sqlite migration', () => {
     }
     expect(got.citations).toBe(11)
     expect(got.authors).toBe('["A","B"]')
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('enforces one SELECTED per push and unique agent ranks (v19 hard constraints)', () => {
+    const { db, dir } = tempDb()
+    db.prepare(`INSERT INTO pushes (id, topic, stage, status) VALUES (1, 'control', 1, 'completed')`).run()
+    db.prepare(`INSERT INTO papers (id, title, metadata_source) VALUES ('p:1', 'One', 'test')`).run()
+    db.prepare(`INSERT INTO papers (id, title, metadata_source) VALUES ('p:2', 'Two', 'test')`).run()
+    db.prepare(
+      `INSERT INTO candidates (push_id, paper_id, agent_rank, selection_outcome, candidate_pool)
+       VALUES (1, 'p:1', 1, 'SELECTED', 'recent')`,
+    ).run()
+    // A second SELECTED on the same push must be rejected by SQLite itself.
+    expect(() =>
+      db.prepare(
+        `INSERT INTO candidates (push_id, paper_id, agent_rank, selection_outcome, candidate_pool)
+         VALUES (1, 'p:2', 2, 'SELECTED', 'recent')`,
+      ).run(),
+    ).toThrow(/UNIQUE/)
+    // A duplicate agent_rank (p:2 with rank 1) must also be rejected.
+    expect(() =>
+      db.prepare(
+        `INSERT INTO candidates (push_id, paper_id, agent_rank, candidate_pool)
+         VALUES (1, 'p:2', 1, 'recent')`,
+      ).run(),
+    ).toThrow(/UNIQUE/)
+    db.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('v19 migration repairs legacy duplicate agent_rank rows before enforcing uniqueness', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v19-'))
+    const db = openDb(dir)
+    db.prepare(`INSERT INTO pushes (id, topic, stage, status) VALUES (1, 'control', 1, 'completed')`).run()
+    db.prepare(`INSERT INTO papers (id, title, metadata_source) VALUES ('p:1', 'One', 'test')`).run()
+    db.prepare(`INSERT INTO papers (id, title, metadata_source) VALUES ('p:2', 'Two', 'test')`).run()
+    db.prepare(`INSERT INTO papers (id, title, metadata_source) VALUES ('p:3', 'Three', 'test')`).run()
+    // Simulate a pre-v19 DB: drop the unique index, insert colliding ranks.
+    db.exec('DROP INDEX IF EXISTS uq_candidates_agent_rank')
+    db.exec(`INSERT INTO candidates (push_id, paper_id, agent_rank, final_score, candidate_pool) VALUES (1, 'p:1', 1, 0.9, 'recent')`)
+    db.exec(`INSERT INTO candidates (push_id, paper_id, agent_rank, final_score, selection_outcome, candidate_pool) VALUES (1, 'p:2', 1, 0.5, 'SELECTED', 'recent')`)
+    db.exec(`INSERT INTO candidates (push_id, paper_id, agent_rank, final_score, candidate_pool) VALUES (1, 'p:3', 1, 0.2, 'recent')`)
+    // Re-run migration: the SELECTED row keeps rank 1, others are nulled.
+    db.exec('PRAGMA user_version = 18')
+    migrate(db)
+    const rows = db.prepare('SELECT paper_id, agent_rank, selection_outcome FROM candidates ORDER BY paper_id').all() as Array<{ paper_id: string; agent_rank: number | null; selection_outcome: string | null }>
+    const selected = rows.find((r) => r.selection_outcome === 'SELECTED')!
+    expect(selected.agent_rank).toBe(1)
+    expect(rows.filter((r) => r.agent_rank === 1)).toHaveLength(1)
     db.close()
     rmSync(dir, { recursive: true, force: true })
   })

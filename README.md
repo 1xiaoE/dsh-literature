@@ -43,9 +43,14 @@ topic → search (Recent + Landmark) → dedupe → pre-rank (Top 15)
 ```sh
 git clone https://github.com/1xiaoE/dsh-literature.git
 cd dsh-literature
-pnpm install
+pnpm install      # `prepare` runs pnpm build automatically; skip with DSH_LIT_SKIP_PREPARE=1
+pnpm build        # explicit build (tsc → lib/ + client bundle) — required before linking
 dsh plugin --profile web add link:/path/to/dsh-literature
 ```
+
+`lib/` is git-ignored (source-only repository), so a fresh clone must build
+before the plugin can be loaded. `prepare`/`prepack` build on install/pack for
+consumers; `pnpm build` is always safe to run again.
 
 ## Configuration
 

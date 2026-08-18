@@ -23,6 +23,14 @@ export interface ResearchField {
 export interface PaperField extends ResearchField { source: FieldSource; confidence: number | null }
 export interface FieldInput { nameEn: string; nameZh: string }
 
+/** One auto-classification rule: a field plus the keyword terms that match it. */
+export interface FieldRule extends FieldInput {
+  slug: string
+  terms: string[]
+  /** true when the field should be created on demand (auto-created). */
+  create?: true
+}
+
 interface FieldRow {
   id: number
   slug: string
@@ -42,7 +50,12 @@ const SEED_FIELDS: Array<FieldInput & { slug: string }> = [
   { slug: 'uncategorized', nameEn: 'Uncategorized', nameZh: '未分类' },
 ]
 
-const AUTO_RULES: Array<FieldInput & { slug: string; terms: string[]; create?: true }> = [
+/**
+ * Default auto-classification rules (broad fields + keyword terms). Kept
+ * exported so presets/configs can override or extend the rule set without
+ * touching the resolver.
+ */
+export const AUTO_RULES: FieldRule[] = [
   { slug: 'robotics', nameEn: 'Robotics', nameZh: '机器人学', terms: ['robot', 'robotic', 'legged', 'quadruped', 'biped', 'humanoid', 'locomotion', 'manipulator', 'actuator', 'exoskeleton'] },
   { slug: 'agricultural-robotics', nameEn: 'Agricultural Robotics', nameZh: '农业机器人', terms: ['agricultural robot', 'field robot', 'harvest', 'weed', 'orchard', 'agri-robot', 'greenhouse robot'] },
   { slug: 'agricultural-engineering', nameEn: 'Agricultural Engineering', nameZh: '农业工程', terms: ['agricultural engineering', 'tractor', 'planter', 'sprayer', 'tillage', 'agronomic', 'precision agriculture'] },
@@ -254,7 +267,7 @@ function confidence(matchCount: number): number { return Math.min(.96, .76 + Mat
  */
 export function resolvePaperFields(db: Db, paperId: string): void {
   ensureResearchFieldSeeds(db)
-  const paper = db.prepare('SELECT title, abstract, venue FROM papers WHERE id = ?').get(paperId) as { title: string; abstract: string | null; venue: string | null } | undefined
+  const paper = db.prepare('SELECT title, abstract, venue, keywords FROM papers WHERE id = ?').get(paperId) as { title: string; abstract: string | null; venue: string | null; keywords: string | null } | undefined
   if (paper === undefined) return
   if (!isLibraryPaper(db, paperId)) {
     // Retrieved-only candidate: no auto classification. Purge any stale auto
@@ -266,7 +279,14 @@ export function resolvePaperFields(db: Db, paperId: string): void {
     `SELECT pu.topic FROM candidates c JOIN pushes pu ON pu.id = c.push_id
      WHERE c.paper_id = ? ORDER BY pu.id DESC LIMIT 1`,
   ).get(paperId) as { topic: string } | undefined
-  const text = normalized(`${paper.title} ${paper.abstract ?? ''} ${paper.venue ?? ''} ${topic?.topic ?? ''}`)
+  // Keywords (extracted from the PDF or enriched) are first-class
+  // classification text — they often carry the strongest topical signal.
+  let keywords = ''
+  try {
+    const parsed: unknown = JSON.parse(paper.keywords ?? '[]')
+    if (Array.isArray(parsed)) keywords = parsed.filter((v): v is string => typeof v === 'string').join(' ')
+  } catch { /* legacy plain-text keywords tolerated */ }
+  const text = normalized(`${paper.title} ${paper.abstract ?? ''} ${paper.venue ?? ''} ${keywords} ${topic?.topic ?? ''}`)
   const matches = AUTO_RULES.map((rule) => ({ rule, n: rule.terms.filter((term) => text.includes(normalized(term))).length })).filter((match) => match.n > 0)
   const autoIds: number[] = []
   for (const { rule, n } of matches) {
