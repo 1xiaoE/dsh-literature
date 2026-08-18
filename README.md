@@ -8,18 +8,12 @@ This is a **pure plugin / workflow source repository**: no personal reading libr
 
 ## Features
 
-- **Multi-source retrieval** — arXiv, OpenAlex, Crossref, Unpaywall; RecentPool + LandmarkPool with curated seeds
-- **Two-stage ranking** — deterministic pre-ranking (Top 15) → one-shot batch agent semantic ranking, with stage-relevance and curriculum-value gates
-- **Knowledge-gap guidance** — priority knowledge goal weighting; `requiredGoals` stage gate (a stage never graduates by paper count alone)
-- **Quality First, Access Second** — papers are ranked on academic merit; fulltext acquisition happens rank-by-rank afterwards and never overrides quality (OA availability does not raise academic quality)
-- **Exploration-first recommendation** — already-read papers are excluded from the shortlist and attempted-but-failed ones are decayed (×0.35), so each push surfaces fresh material instead of re-recommending the same "hard" papers forever
-- **Direct Publisher Access** — generic `publisher_browser` provider: DOI direct resolution → publisher article page → PDF; login walls park the push as `AUTH_REQUIRED` (HITL), never a fake failure
-- **Manual PDF cut-in (HITL)** — when the browser session cannot download a PDF automatically, the user downloads it by hand; the agent registers it via `manualPdfPath`, and the file is **moved (剪切) into the library** (`pdfs/<sha256>.pdf`) instead of copied — the `~/Downloads` copy is removed on success, leaving no duplicates
-- **Per-domain rate limit** — attempts are throttled per publisher host (IEEE never blocks Springer); a manual login clears the gate so resume retries immediately
-- **Verified full-text** — legal PDF fallback chain, %PDF- magic / size / sha256 validation, chunked token-safe reading, reading-coverage provenance (`total_chunks / read_chunks / read_coverage / coverage_basis`)
-- **Full SQLite provenance** — papers, scoring traces, fetch log (access_type: `oa` / `institutional` / `manual`, `is_open_access`), retrievals, per-phase timings, stages, user actions
-- **Human-in-the-loop** — five-part user-action records, resume from the original step, 0-LLM deterministic finalize
-- **Headless-first** — cron-friendly CLI (institutional access ≠ open access; legacy CARSI off by default)
+- **Staged curriculum & knowledge-gap ranking** — multi-source retrieval (arXiv, OpenAlex, Crossref, Unpaywall) with Recent + Landmark pools; deterministic pre-rank (Top 15) → one-shot batch agent ranking, gated by stage-relevance and curriculum-value
+- **Quality First, Access Second** — papers are ranked on academic merit; full text is acquired rank-by-rank afterwards (public/OA → publisher browser), so a login wall parks the push as `AUTH_REQUIRED` (HITL) instead of ever faking a failure
+- **Verified full-text reading** — legal PDF fallback chain with %PDF- / size / sha256 validation, chunked token-safe reading, and reading-coverage provenance (`total_chunks / read_chunks / read_coverage / coverage_basis`)
+- **Human-in-the-loop** — five-part action records, resume from the original step, 0-LLM deterministic finalize when possible
+- **Harness UI** — a **Literature** sidebar entry opens the Literature Workflow page (Execution / Search Keywords / Categories / Papers / Paper Details); a pure presentation layer over the existing SQLite
+- **Library organization** — research-field categories, local PDF import, and pushless deep-read, all with full SQLite provenance
 
 ## Architecture
 
@@ -51,9 +45,7 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 
 ## Configuration
 
-See `cordis.patch.yml` and `DESIGN.md` for the full schema (topics, stages, goals, ranking weights, thresholds, `publisherBrowser` block, legacy `carsi` block).
-
-Key knobs:
+Full schema (topics, stages, goals, ranking weights, thresholds, `publisherBrowser` block, legacy `carsi` block) lives in `cordis.patch.yml` and `DESIGN.md`.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -61,6 +53,10 @@ Key knobs:
 | `publisherBrowser.minIntervalMinutes` | `2` | per-publisher-domain rate limit (IEEE ≠ Springer); login clears it for immediate resume |
 | `carsi.enabled` | `false` | LEGACY CARSI portal navigation — kept for history/tests only |
 | `ranking.fulltextAvailability` | `0.03` | OA availability is only an acquisition-cost hint, never a quality signal |
+| `fulltext.minReadCoverage` | `1.0` | minimum full-text coverage before `completed`; default requires all indexed chunks to be read |
+| `retrieval.maxQueriesPerPool` | `8` | balanced query cap per pool for normal retrieval adapters |
+| `retrieval.arxivMaxQueriesPerPool` | `4` | stricter per-pool query cap for the rate-limited arXiv API |
+| `retrieval.sourceConcurrency` | `4` | bounded concurrency for non-arXiv retrieval adapters |
 
 ### OpenAlex API key (optional but recommended)
 
@@ -81,7 +77,7 @@ node bin/dsh-literature-browser-login.mjs --url <article>   # login for a specif
 node bin/dsh-literature-browser-login.mjs --check           # browser session status
 ```
 
-> **手动 PDF 剪切入库**：登录墙/限流时，用户在浏览器里手动下载论文 PDF 到 `~/Downloads`，再把路径告诉 agent；agent 调用 `literature_fetch_pdf(pushId, paperId, manualPdfPath=<path>)` 校验后**剪切**进知识库（源文件不再残留）。详见 [Human-in-the-loop](#human-in-the-loop)。
+> **Manual PDF cut-in**: when a login wall or rate limit blocks the automated browser, download the article PDF yourself to `~/Downloads` and hand the path to the agent — `literature_fetch_pdf(pushId, paperId, manualPdfPath=<path>)` validates it and **moves (剪切) it into the library** (`pdfs/<sha256>.pdf`), removing the source copy. See [Human-in-the-loop](#human-in-the-loop).
 
 ### Full acquisition order (per ranked candidate)
 
@@ -97,6 +93,15 @@ Rank #1 → quality gate pass? → public/OA chain (arXiv / OpenAlex OA / Unpayw
        └─ PDF_NOT_FOUND → next ranked candidate
 Then Rank #2, #3, ... — once SELECTED, all further acquisition stops (≤ 1 per push)
 ```
+
+## Library Organization
+
+Independent of workflow topics: `categories` / `paper_categories` organize the library by research field (deterministic, local classification), while `pushes` / `stages` keep their own curriculum semantics.
+
+- **Research fields** — papers can be tagged with fields (auto or manual); counts and management are exposed in the Harness UI's Categories panel
+- **Local PDF import** — drop a PDF into the library (binary upload via `/api/dsh-literature/import-pdf`); metadata is completed through the existing source adapters (`lookupMetadata`, DOI-preferred) without creating a push
+- **Deep read** — re-read an already-library-owned PDF pushlessly (`/papers/:id/deep-read`), reusing the full-text index / chunk reads / report storage
+- **Reports table** — every workflow or deep-read report is recorded (`reports`), and reading jobs track `paper_reading_jobs` status
 
 ## Curriculum
 
@@ -154,7 +159,7 @@ The manual PDF is recorded with `access_type=manual`, `is_open_access=0` (a priv
 
 ```
 ~/.local/share/dsh-literature/
-├── literature.db      # SQLite provenance
+├── literature.db      # SQLite provenance (papers, pushes, categories, reports, …)
 ├── pdfs/<sha256>.pdf  # content-hashed downloads
 ├── cache/             # adapter caches
 ├── reports/           # canonical reading reports
@@ -162,6 +167,16 @@ The manual PDF is recorded with `access_type=manual`, `is_open_access=0` (a priv
 ├── publisher_browser/ # per-domain rate-limit ledger
 └── carsi/             # legacy CARSI ledger (disabled by default)
 ```
+
+## Harness UI (Literature Workflow)
+
+A **Literature** entry in the left sidebar opens the **Literature Workflow** page: **Execution** (real push state, including the `AUTH_REQUIRED` card with Open Publisher / Resume), **Search Keywords** (Run / Resume invoke the existing CLI runner), **Categories** (workflow + research fields + workflow topics), **Papers** (real SQLite records with agentRank / score / SELECTED / PDF / READ / REPORT flags), and **Paper Details** (real fields mapped from the schema; missing ones render `-`). The UI is a pure presentation layer: every payload comes from `/api/dsh-literature/*` routes served by this plugin's own node half, which reads the **existing** SQLite. No second database, no re-implemented retrieval/ranking/acquisition, no duplicated workflow.
+
+- `src/ui/` — node-half adapter + HTTP routes (dashboard, push status, papers, PDF/report streaming, local PDF import, research-field management, deep-read, run/resume)
+- `src/client/` — browser half: sidebar entry + workbench React tree (view-model driven panels)
+- When the route family is unreachable, development builds may use clearly marked **Demo** payloads; production shows **Backend unavailable** with **Retry** and never silently substitutes mock data.
+
+To open it in the GUI: restart `dsh web` (the client bundle is discovered at boot), then click the book-shaped **Literature** entry in the sidebar.
 
 ## Development
 
@@ -172,35 +187,13 @@ pnpm test        # vitest
 pnpm watch       # tsdown --watch (client bundle HMR)
 ```
 
-## Harness UI (Literature Workflow)
-
-The web profile serves a visualization of this workflow: a **Literature** entry in the
-left sidebar opens the **Literature Workflow** page (Execution / Search Keywords /
-Categories / Papers / Paper Details). The UI is a presentation layer only — every
-payload comes from `/api/dsh-literature/*` routes served by this plugin's own node
-half, which read the **existing** SQLite (`papers`, `pushes`, `candidates`,
-`fetch_log`, `fulltexts`, `fulltext_reads`, `retrievals`, `user_actions`, `stages`).
-No second database, no re-implemented retrieval/ranking/acquisition, no duplicated
-workflow.
-
-- `src/ui/` — node-half adapter (`adapter.ts`) + HTTP routes (`routes.ts`), wire DTOs (`types.ts`)
-- `src/client/` — browser half: sidebar entry + workbench React tree (`index.ts`, `sidebar-entry.ts`, `mount.tsx`, panels)
-- Run / Resume buttons invoke the **existing** CLI runner
-  (`bin/dsh-literature-push.mjs`) — the workflow itself is untouched.
-- If the route family is unreachable, development builds may use clearly marked
-  **Demo** payloads; production shows **Backend unavailable** with **Retry** and
-  never silently substitutes mock data.
-
-To open it in the GUI: restart `dsh web` (the client bundle is discovered at boot),
-then click the book-shaped **Literature** entry in the sidebar.
-
 ## Tests
 
-PDF fallback chains, per-domain rate limiting, publisher-browser login-wall classification (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND), %PDF- / size / sha256 validation, manual PDF cut-in (source file moved into the library), institutional/manual provenance (`is_open_access=false`), chunking, ranking (OA decoupled from quality), stage/graduation gates, priority-goal matching, HITL + resume (no re-retrieval/re-ranking), report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init + v13→v14 manual provenance), lossless-JSON output boundary.
+PDF fallback chains, per-domain rate limiting, publisher-browser login-wall classification (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND), %PDF- / size / sha256 validation, manual PDF cut-in (source file moved into the library), institutional/manual provenance (`is_open_access=false`), chunking, ranking (OA decoupled from quality), stage/graduation gates, priority-goal matching, HITL + resume (no re-retrieval/re-ranking), report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init + v13→v14 manual provenance, v15 acquisition state, v17 library organization), UI adapter / routes / client view-model + components, and the lossless-JSON output boundary.
 
 ## Current Status
 
-**V0.1** — stable; a workflow/plugin source repository, not a standalone application. Smoke-tested end-to-end on real non-OA papers (IEEE T-RO via manual/institutional login; publisher login-wall HITL flow verified).
+**V0.1** — stable; a workflow/plugin source repository, not a standalone application. Smoke-tested end-to-end on real non-OA papers (IEEE T-RO via manual/institutional login; publisher login-wall HITL flow verified). Harness UI and library-organization layer (schema v17) shipped.
 
 ## Roadmap
 

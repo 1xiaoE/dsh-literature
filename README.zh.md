@@ -8,18 +8,12 @@
 
 ## 特性
 
-- **多源检索** — arXiv / OpenAlex / Crossref / Unpaywall；RecentPool + LandmarkPool（支持 curated seeds）
-- **两阶段排序** — 确定性预排序（Top 15）→ 一次性批量 agent 语义排序，带 stage-relevance 与 curriculum-value 硬门槛
-- **知识缺口引导** — priority knowledge goal 加权；`requiredGoals` 阶段毕业门（仅凭论文数量不能毕业）
-- **Quality First, Access Second** — 论文先按学术质量排序；全文获取在排序后逐篇进行，绝不覆盖质量（OA 可得性不提高学术质量）
-- **探索优先推荐** — 已读论文从候选短名单排除；尝试过但失败的论文降权（×0.35），每次推送优先展示新材料，避免永远重复推荐同一批"难啃"论文
-- **Direct Publisher Access** — 通用 `publisher_browser` provider：DOI 直连 → 出版社文章页 → PDF；登录墙将推送停驻为 `AUTH_REQUIRED`（HITL），绝不伪装失败
-- **手动 PDF 剪切入库（HITL）** — 自动浏览器无法下载 PDF 时，由用户手动下载；agent 经 `manualPdfPath` 登记，文件**剪切（move）而非复制**进知识库（`pdfs/<sha256>.pdf`）——`~/Downloads` 副本在成功后即被移除，不留重复文件
-- **per-domain 限流** — 按出版社域名限流（IEEE 永不阻塞 Springer）；人工登录即清除限流，resume 可立即重试同一论文
-- **全文验证阅读** — 合法 PDF 回退链、%PDF- 魔数/大小/sha256 校验、分块 token 安全阅读、阅读覆盖率溯源（`total_chunks / read_chunks / read_coverage / coverage_basis`）
-- **完整 SQLite 溯源** — 论文、评分轨迹、抓取日志（access_type: `oa` / `institutional` / `manual`、`is_open_access`）、检索记录、各阶段耗时、阶段、用户待办
-- **Human-in-the-loop** — 五要素用户待办、从原步骤恢复、0-LLM 确定性收口
-- **headless 优先** — cron 友好 CLI（机构授权 ≠ 开放获取；legacy CARSI 默认禁用）
+- **分阶段课程 + 知识缺口排序** — 多源检索（arXiv / OpenAlex / Crossref / Unpaywall，Recent + Landmark 双池）；确定性预排序（Top 15）→ 一次批量 agent 语义排序，带 stage-relevance 与 curriculum-value 硬门槛
+- **Quality First, Access Second** — 论文先按学术质量排序；全文按排名逐篇获取（公开/OA → 出版社浏览器），登录墙停驻为 `AUTH_REQUIRED`（HITL），绝不伪装失败
+- **全文验证阅读** — 合法 PDF 回退链 + %PDF- / 大小 / sha256 校验、分块 token 安全阅读、阅读覆盖率溯源（`total_chunks / read_chunks / read_coverage / coverage_basis`）
+- **Human-in-the-loop** — 五要素用户待办、从原步骤恢复、可确定性时 0-LLM 收口
+- **Harness UI** — 侧边栏 **Literature** 入口打开 Literature Workflow 页面（Execution / Search Keywords / Categories / Papers / Paper Details）；纯表现层，直接读取现有 SQLite
+- **文献库组织** — 研究领域分类、本地 PDF 导入、无推送深读（deep-read），全量 SQLite 溯源
 
 ## 架构
 
@@ -53,8 +47,6 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 
 完整配置 schema 见 `cordis.patch.yml` 与 `DESIGN.md`（主题、阶段、知识目标、排序权重、阈值、`publisherBrowser` 块、legacy `carsi` 块）。
 
-关键旋钮：
-
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `publisherBrowser.enabled` | `true` | 通用出版社浏览器机构访问总开关 |
@@ -63,7 +55,7 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 | `ranking.fulltextAvailability` | `0.03` | OA 可得性仅是获取成本提示，绝非质量信号 |
 | `fulltext.minReadCoverage` | `1.0` | completed 前最低全文阅读覆盖率；默认要求所有 indexed chunks 均读过 |
 | `retrieval.maxQueriesPerPool` | `8` | 普通检索源每个 pool 的均衡 query 上限 |
-| `retrieval.arxivMaxQueriesPerPool` | `4` | arXiv 每个 pool 的更严格 query 上限（保留 3.1 s 串行礼貌间隔） |
+| `retrieval.arxivMaxQueriesPerPool` | `4` | arXiv 每个 pool 的更严格 query 上限（保留串行礼貌间隔） |
 | `retrieval.sourceConcurrency` | `4` | 非 arXiv 检索源的有界并发数 |
 
 ### OpenAlex API key（可选但推荐）
@@ -101,6 +93,15 @@ Rank #1 → 质量门通过？→ public/OA 链（arXiv / OpenAlex OA / Unpaywal
        └─ PDF_NOT_FOUND → 下一排名候选
 然后 Rank #2、#3…… — 一旦 SELECTED 立即停止后续获取（每推送 ≤ 1 篇）
 ```
+
+## 文献库组织
+
+与工作流主题相互独立：`categories` / `paper_categories` 按研究领域组织文献库（确定性、本地分类），而 `pushes` / `stages` 保留各自的课程语义。
+
+- **研究领域** — 论文可标记领域（自动或手动）；计数与管理在 Harness UI 的 Categories 面板中提供
+- **本地 PDF 导入** — 直接导入 PDF 入库存档（`/api/dsh-literature/import-pdf` 二进制上传）；元数据经现有源适配器补全（`lookupMetadata`，优先 DOI），不创建 push
+- **Deep read** — 对已有 PDF 无推送重读（`/papers/:id/deep-read`），复用全文索引 / 分块阅读 / 报告存储
+- **报告表** — 每次工作流或 deep-read 报告都记录到 `reports`；阅读任务状态见 `paper_reading_jobs`
 
 ## 课程（Curriculum）
 
@@ -157,7 +158,7 @@ node bin/dsh-literature-push.mjs --resume <pushId>
 
 ```
 ~/.local/share/dsh-literature/
-├── literature.db      # SQLite 溯源
+├── literature.db      # SQLite 溯源（papers / pushes / categories / reports / …）
 ├── pdfs/<sha256>.pdf  # 内容哈希存储
 ├── cache/             # 适配器缓存
 ├── reports/           # canonical 精读报告
@@ -165,6 +166,16 @@ node bin/dsh-literature-push.mjs --resume <pushId>
 ├── publisher_browser/ # per-domain 限流 ledger
 └── carsi/             # legacy CARSI ledger（默认禁用）
 ```
+
+## Harness UI（Literature Workflow）
+
+侧边栏 **Literature** 入口打开 **Literature Workflow** 页面：**Execution**（真实 push 状态，含 `AUTH_REQUIRED` 卡片与 Open Publisher / Resume）、**Search Keywords**（Run / Resume 调用现有 CLI runner）、**Categories**（workflow + 研究领域 + workflow 主题）、**Papers**（真实 SQLite 记录，带 agentRank / score / SELECTED / PDF / READ / REPORT 标记）、**Paper Details**（真实字段按 schema 映射，缺失字段显示 `-`）。UI 只是表现层——所有数据都来自本插件 node 半端提供的 `/api/dsh-literature/*` 路由，这些路由直接读取**现有** SQLite。没有第二套数据库、没有重新实现 retrieval/ranking/acquisition、没有复制独立 workflow。
+
+- `src/ui/` — node 半端适配层 + HTTP 路由（dashboard、push 状态、论文、PDF/报告流式预览、本地 PDF 导入、研究领域管理、deep-read、run/resume）
+- `src/client/` — 浏览器半端：侧边栏入口 + 工作台 React 树（view-model 驱动的各面板）
+- 路由家族不可达时，开发构建可使用明确标注的 **Demo** 数据；production 显示 **后端不可用** 与 **重试**，不会静默用 mock 替代真实数据
+
+在 GUI 中打开：重启 `dsh web`（client bundle 在启动时被发现），然后点击侧边栏书本形 **Literature** 入口。
 
 ## 开发
 
@@ -175,31 +186,13 @@ pnpm test        # vitest
 pnpm watch       # tsdown --watch（client bundle HMR）
 ```
 
-## Harness UI（Literature Workflow）
-
-Web profile 提供本工作流的可视化：左侧边栏新增 **Literature** 入口，点击打开
-**Literature Workflow** 页面（Execution / Search Keywords / Categories / Papers /
-Paper Details）。UI 只是表现层——所有数据都来自本插件 node 半端提供的
-`/api/dsh-literature/*` 路由，而这些路由直接读取**现有** SQLite（`papers`、
-`pushes`、`candidates`、`fetch_log`、`fulltexts`、`fulltext_reads`、
-`retrievals`、`user_actions`、`stages`）。没有第二套数据库、没有重新实现
-retrieval/ranking/acquisition、没有复制独立 workflow。
-
-- `src/ui/` — node 半端适配层（`adapter.ts`）+ HTTP 路由（`routes.ts`），wire DTO（`types.ts`）
-- `src/client/` — 浏览器半端：侧边栏入口 + 工作台 React 树（`index.ts`、`sidebar-entry.ts`、`mount.tsx`、各面板）
-- Run / Resume 按钮调用**现有** CLI runner（`bin/dsh-literature-push.mjs`）——工作流本体不受影响
-- 路由家族不可达时，开发构建可使用明确标注的 **Demo** 数据；production 显示
-  **后端不可用** 与 **重试**，不会静默用 mock 替代真实数据
-
-在 GUI 中打开：重启 `dsh web`（client bundle 在启动时被发现），然后点击侧边栏书本形 **Literature** 入口。
-
 ## 测试
 
-Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（RATE_LIMITED）、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF-/大小/sha256 校验、手动 PDF 剪切入库（源文件移入知识库）、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + DB v15 acquisition state / policy snapshot）、lossless-JSON 输出边界。
+Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（RATE_LIMITED）、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF- / 大小 / sha256 校验、手动 PDF 剪切入库（源文件移入知识库）、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + v13→v14 手动 provenance、v15 acquisition state、v17 文献库组织）、UI adapter / routes / client view-model + 组件、lossless-JSON 输出边界。
 
 ## 当前状态
 
-**V0.1** — 稳定；工作流/插件源码仓库，非独立应用。已在真实非 OA 论文上端到端 smoke test（IEEE T-RO 经机构/手动登录获取；出版社登录墙 HITL 流程已验证）。
+**V0.1** — 稳定；工作流/插件源码仓库，非独立应用。已在真实非 OA 论文上端到端 smoke test（IEEE T-RO 经机构/手动登录获取；出版社登录墙 HITL 流程已验证）。Harness UI 与文献库组织层（schema v17）已发布。
 
 ## Roadmap
 
