@@ -1,9 +1,9 @@
 {
   "name": "dsh-literature",
   "version": "0.1.0",
-  "description": "...",
+  "description": "Literature Agent for dsh: periodic paper search, selection, PDF fetch, chunked full-text reading, structured summary reports and push history. Model-agnostic (no LLM calls from plugin code).",
   "license": "MIT",
-  "type": "module"
+  "type": "module",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
