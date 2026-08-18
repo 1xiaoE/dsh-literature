@@ -5,8 +5,9 @@
  */
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
+import { backfillResearchFields, resolvePaperFields } from './lib/research_fields.js'
 
-export const SCHEMA_VERSION = 15
+export const SCHEMA_VERSION = 17
 
 export type Db = DatabaseSync
 
@@ -526,6 +527,74 @@ ALTER TABLE fetch_log_new RENAME TO fetch_log;
       db.exec('PRAGMA foreign_keys = ON')
     }
   }
+  if (version < 16) {
+    // Research fields are a library-organization layer only. They do not
+    // replace pushes.topic, curriculum stages, retrieval, or ranking state.
+    db.exec(`
+CREATE TABLE IF NOT EXISTS categories (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug        TEXT NOT NULL UNIQUE,
+  name_en     TEXT NOT NULL,
+  name_zh     TEXT NOT NULL,
+  type        TEXT NOT NULL CHECK (type IN ('field','topic')),
+  created_by  TEXT NOT NULL CHECK (created_by IN ('system','auto','user')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS category_aliases (
+  category_id     INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  normalized_name TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (category_id, normalized_name)
+);
+CREATE TABLE IF NOT EXISTS paper_categories (
+  paper_id    TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  source      TEXT NOT NULL CHECK (source IN ('auto','manual')),
+  state       TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','excluded')),
+  confidence  REAL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (paper_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_categories_category ON paper_categories(category_id, state);
+`)
+    backfillResearchFields(db)
+  }
+  if (version < 17) {
+    // Library imports are papers first, never a parallel manual library.  The
+    // supplemental columns retain extracted metadata without changing the
+    // retrieval/ranking model, while reports/read jobs normalize assets that
+    // do not belong to a workflow push.
+    const paperCols = db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>
+    if (!paperCols.some((c) => c.name === 'affiliation')) db.exec('ALTER TABLE papers ADD COLUMN affiliation TEXT;')
+    if (!paperCols.some((c) => c.name === 'keywords')) db.exec('ALTER TABLE papers ADD COLUMN keywords TEXT;')
+    if (!paperCols.some((c) => c.name === 'metadata_enriched_at')) db.exec('ALTER TABLE papers ADD COLUMN metadata_enriched_at TEXT;')
+    db.exec(`
+CREATE TABLE IF NOT EXISTS reports (
+  paper_id    TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+  report_path TEXT NOT NULL,
+  source      TEXT NOT NULL CHECK (source IN ('workflow','deep_read')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS paper_reading_jobs (
+  paper_id    TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+  status      TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
+  read_chunks INTEGER NOT NULL DEFAULT 0,
+  total_chunks INTEGER NOT NULL DEFAULT 0,
+  error_detail TEXT,
+  started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_paper_reading_jobs_status ON paper_reading_jobs(status);
+INSERT INTO reports (paper_id, report_path, source, created_at, updated_at)
+  SELECT paper_id, report_path, 'workflow', COALESCE(finished_at, started_at, datetime('now')), datetime('now')
+  FROM pushes
+  WHERE paper_id IS NOT NULL AND report_path IS NOT NULL AND report_path <> ''
+  ON CONFLICT(paper_id) DO UPDATE SET report_path=excluded.report_path, source='workflow', updated_at=excluded.updated_at;
+`)
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }
 
@@ -544,18 +613,23 @@ export interface PaperRow {
   citations: number | null
   bibtex: string | null
   metadata_source: string
+  affiliation?: string | null
+  keywords?: string | null
+  metadata_enriched_at?: string | null
 }
 
 /** Upsert a paper; returns its canonical id. */
 export function upsertPaper(db: Db, p: PaperRow): string {
   db.prepare(
-    `INSERT INTO papers (id,title,authors,venue,year,doi,arxiv_id,openalex_id,url,oa_pdf_url,abstract,citations,bibtex,metadata_source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `INSERT INTO papers (id,title,authors,venue,year,doi,arxiv_id,openalex_id,url,oa_pdf_url,abstract,citations,bibtex,metadata_source,affiliation,keywords,metadata_enriched_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(id) DO UPDATE SET
        title=excluded.title, authors=excluded.authors, venue=excluded.venue, year=excluded.year,
        doi=excluded.doi, arxiv_id=excluded.arxiv_id, openalex_id=excluded.openalex_id,
        url=excluded.url, oa_pdf_url=excluded.oa_pdf_url, abstract=excluded.abstract, citations=excluded.citations,
-       bibtex=excluded.bibtex, metadata_source=excluded.metadata_source`,
+       bibtex=excluded.bibtex, metadata_source=excluded.metadata_source,
+       affiliation=excluded.affiliation, keywords=excluded.keywords,
+       metadata_enriched_at=excluded.metadata_enriched_at`,
   ).run(
     p.id,
     p.title,
@@ -571,7 +645,11 @@ export function upsertPaper(db: Db, p: PaperRow): string {
     p.citations,
     p.bibtex,
     p.metadata_source,
+    p.affiliation ?? null,
+    p.keywords ?? null,
+    p.metadata_enriched_at ?? null,
   )
+  resolvePaperFields(db, p.id)
   return p.id
 }
 

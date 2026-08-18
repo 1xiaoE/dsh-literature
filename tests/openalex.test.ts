@@ -221,7 +221,7 @@ describe('auth provenance (never the key)', () => {
     const { openDb } = await import('../src/db.js')
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(15)
+    expect(version.user_version).toBe(17)
     const cols = (db.prepare('PRAGMA table_info(retrievals)').all() as Array<{ name: string }>).map((c) => c.name)
     expect(cols).toContain('auth_mode')
     db.close()

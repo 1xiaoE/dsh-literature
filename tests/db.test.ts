@@ -22,12 +22,12 @@ describe('sqlite migration', () => {
     migrate(db)
     migrate(db)
     const row = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(row.user_version).toBe(15)
+    expect(row.user_version).toBe(17)
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>
     const names = tables.map((t) => t.name)
-    for (const t of ['papers', 'pushes', 'candidates', 'fetch_log', 'fulltexts', 'fulltext_chunks', 'stages', 'retrievals', 'knowledge_coverage']) {
+    for (const t of ['papers', 'pushes', 'candidates', 'fetch_log', 'fulltexts', 'fulltext_chunks', 'stages', 'retrievals', 'knowledge_coverage', 'categories', 'category_aliases', 'paper_categories']) {
       expect(names).toContain(t)
     }
     db.close()

@@ -10,6 +10,7 @@ import type {
   PdfCandidate,
   PlannedQuery,
   SearchHit,
+  SearchParams,
   SourceAdapter,
 } from './types.js'
 import { canonicalId, normalizeTitle } from './types.js'
@@ -320,6 +321,44 @@ export class SourceRegistry {
       if (ext) merged = { ...merged, ...ext }
     }
     return merged
+  }
+
+  /**
+   * One-paper bibliographic completion used by local imports.  It uses the
+   * existing source adapters but persists neither retrievals nor candidates,
+   * so it cannot become a workflow push.  DOI expansion is preferred; when a
+   * DOI is absent, one bounded title(+author) query supplies a possible
+   * canonical record and `expand` completes it.
+   */
+  async lookupMetadata(paper: PaperRef): Promise<PaperRef> {
+    if (paper.doi || paper.openalexId || paper.arxivId) return this.expand(paper)
+    const query = [paper.title, paper.authors.slice(0, 2).join(' ')].filter(Boolean).join(' ')
+    if (!query) return paper
+    const params: SearchParams = {
+      queries: [{ text: query, language: 'en', kind: 'canonical', pool: 'recent' }],
+      pool: 'recent', recentYears: 100, limitPerQuery: 5,
+    }
+    const hits: PaperRef[] = []
+    for (const adapter of this.retrievalAdapters()) {
+      const result = await adapter.search(params).catch(() => [] as SearchHit[])
+      hits.push(...result.map((hit) => hit.paper))
+    }
+    const localTitle = new Set(normalizeTitle(paper.title).split(' ').filter(Boolean))
+    const candidate = mergePapers(hits)
+      .map((value) => {
+        const theirs = new Set(normalizeTitle(value.title).split(' ').filter(Boolean))
+        let shared = 0
+        for (const token of localTitle) if (theirs.has(token)) shared += 1
+        const titleScore = localTitle.size === 0 || theirs.size === 0 ? 0 : shared / Math.max(localTitle.size, theirs.size)
+        const authorScore = value.authors.some((author) => paper.authors.some((local) => normalizeTitle(local) === normalizeTitle(author))) ? 0.12 : 0
+        return { value, score: titleScore + authorScore }
+      })
+      .sort((a, b) => b.score - a.score)[0]
+    // Never import identifiers from a merely top-ranked search result. A
+    // targeted lookup must still identify the local PDF with high confidence.
+    if (!candidate || candidate.score < 0.75) return paper
+    const merged: PaperRef = combine({ ...paper }, candidate.value)
+    return this.expand({ ...merged, id: canonicalId(merged) })
   }
 
   /** All legal PDF candidates across adapters, deduplicated by URL. */

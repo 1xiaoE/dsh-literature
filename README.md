@@ -166,10 +166,33 @@ The manual PDF is recorded with `access_type=manual`, `is_open_access=0` (a priv
 ## Development
 
 ```sh
-pnpm typecheck
-pnpm build       # tsc → lib/
+pnpm typecheck   # node half + client half (tsconfig.json + tsconfig.client.json)
+pnpm build       # tsc → lib/ then tsdown → lib/client.js (Harness UI bundle)
 pnpm test        # vitest
+pnpm watch       # tsdown --watch (client bundle HMR)
 ```
+
+## Harness UI (Literature Workflow)
+
+The web profile serves a visualization of this workflow: a **Literature** entry in the
+left sidebar opens the **Literature Workflow** page (Execution / Search Keywords /
+Categories / Papers / Paper Details). The UI is a presentation layer only — every
+payload comes from `/api/dsh-literature/*` routes served by this plugin's own node
+half, which read the **existing** SQLite (`papers`, `pushes`, `candidates`,
+`fetch_log`, `fulltexts`, `fulltext_reads`, `retrievals`, `user_actions`, `stages`).
+No second database, no re-implemented retrieval/ranking/acquisition, no duplicated
+workflow.
+
+- `src/ui/` — node-half adapter (`adapter.ts`) + HTTP routes (`routes.ts`), wire DTOs (`types.ts`)
+- `src/client/` — browser half: sidebar entry + workbench React tree (`index.ts`, `sidebar-entry.ts`, `mount.tsx`, panels)
+- Run / Resume buttons invoke the **existing** CLI runner
+  (`bin/dsh-literature-push.mjs`) — the workflow itself is untouched.
+- If the route family is unreachable, development builds may use clearly marked
+  **Demo** payloads; production shows **Backend unavailable** with **Retry** and
+  never silently substitutes mock data.
+
+To open it in the GUI: restart `dsh web` (the client bundle is discovered at boot),
+then click the book-shaped **Literature** entry in the sidebar.
 
 ## Tests
 

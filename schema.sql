@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS papers (
   citations        INTEGER,
   bibtex           TEXT,
   metadata_source  TEXT NOT NULL,                 -- provenance: adapter that supplied metadata
+  affiliation      TEXT,
+  keywords         TEXT,                          -- JSON array when extracted/enriched
+  metadata_enriched_at TEXT,
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -189,4 +192,54 @@ CREATE TABLE IF NOT EXISTS stages (
   updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-PRAGMA user_version = 15;
+-- Research fields organize papers in the library. They intentionally do not
+-- replace the workflow's topic/stage/curriculum vocabulary.
+CREATE TABLE IF NOT EXISTS categories (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug        TEXT NOT NULL UNIQUE,
+  name_en     TEXT NOT NULL,
+  name_zh     TEXT NOT NULL,
+  type        TEXT NOT NULL CHECK (type IN ('field','topic')),
+  created_by  TEXT NOT NULL CHECK (created_by IN ('system','auto','user')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS category_aliases (
+  category_id     INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  normalized_name TEXT NOT NULL UNIQUE,
+  PRIMARY KEY (category_id, normalized_name)
+);
+CREATE TABLE IF NOT EXISTS paper_categories (
+  paper_id    TEXT NOT NULL REFERENCES papers(id) ON DELETE CASCADE,
+  category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+  source      TEXT NOT NULL CHECK (source IN ('auto','manual')),
+  state       TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active','excluded')),
+  confidence  REAL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (paper_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_paper_categories_category ON paper_categories(category_id, state);
+
+-- Canonical reports are shared by workflow and explicit paper deep reads;
+-- `pushes.report_path` remains supported for legacy workflow provenance.
+CREATE TABLE IF NOT EXISTS reports (
+  paper_id    TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+  report_path TEXT NOT NULL,
+  source      TEXT NOT NULL CHECK (source IN ('workflow','deep_read')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS paper_reading_jobs (
+  paper_id    TEXT PRIMARY KEY REFERENCES papers(id) ON DELETE CASCADE,
+  status      TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
+  read_chunks INTEGER NOT NULL DEFAULT 0,
+  total_chunks INTEGER NOT NULL DEFAULT 0,
+  error_detail TEXT,
+  started_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  finished_at TEXT,
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_paper_reading_jobs_status ON paper_reading_jobs(status);
+
+PRAGMA user_version = 17;

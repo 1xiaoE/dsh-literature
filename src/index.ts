@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { normalizeConfig, type LiteratureConfig } from './config.js'
 import { createRuntime, type LiteratureRuntime } from './lib/runtime.js'
+import { makeUiRoutes, type WebRouteLike } from './ui/routes.js'
 import { defineLiteratureSources } from './tools/literature_sources.js'
 import { defineLiteratureFetchPdf } from './tools/literature_fetch_pdf.js'
 import { defineLiteraturePdfPreflight } from './tools/literature_pdf_preflight.js'
@@ -70,5 +71,17 @@ export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
     defineLiteratureReportWrite(getRt),
   ]) {
     ctx.tools.register(tool)
+  }
+
+  // Harness UI presentation layer: serve the /api/dsh-literature route family
+  // when a web profile provides the webserver. Optional on purpose — the
+  // headless profile has no webserver and must stay unaffected. Bundle order
+  // (dsh-web-app before dsh-literature) guarantees webServer is active here in
+  // web mode; if it is somehow absent the UI simply has no data route.
+  const webServer = ctx.get('webServer') as
+    | { register: (route: WebRouteLike) => () => void }
+    | undefined
+  if (webServer !== undefined) {
+    ctx.effect(() => webServer.register(makeUiRoutes({ getRt })), 'dsh-literature: ui routes')
   }
 }

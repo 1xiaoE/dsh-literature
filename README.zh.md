@@ -169,10 +169,29 @@ node bin/dsh-literature-push.mjs --resume <pushId>
 ## 开发
 
 ```sh
-pnpm typecheck
-pnpm build       # tsc → lib/
+pnpm typecheck   # node 半端 + client 半端（tsconfig.json + tsconfig.client.json）
+pnpm build       # tsc → lib/，再 tsdown → lib/client.js（Harness UI bundle）
 pnpm test        # vitest
+pnpm watch       # tsdown --watch（client bundle HMR）
 ```
+
+## Harness UI（Literature Workflow）
+
+Web profile 提供本工作流的可视化：左侧边栏新增 **Literature** 入口，点击打开
+**Literature Workflow** 页面（Execution / Search Keywords / Categories / Papers /
+Paper Details）。UI 只是表现层——所有数据都来自本插件 node 半端提供的
+`/api/dsh-literature/*` 路由，而这些路由直接读取**现有** SQLite（`papers`、
+`pushes`、`candidates`、`fetch_log`、`fulltexts`、`fulltext_reads`、
+`retrievals`、`user_actions`、`stages`）。没有第二套数据库、没有重新实现
+retrieval/ranking/acquisition、没有复制独立 workflow。
+
+- `src/ui/` — node 半端适配层（`adapter.ts`）+ HTTP 路由（`routes.ts`），wire DTO（`types.ts`）
+- `src/client/` — 浏览器半端：侧边栏入口 + 工作台 React 树（`index.ts`、`sidebar-entry.ts`、`mount.tsx`、各面板）
+- Run / Resume 按钮调用**现有** CLI runner（`bin/dsh-literature-push.mjs`）——工作流本体不受影响
+- 路由家族不可达时，开发构建可使用明确标注的 **Demo** 数据；production 显示
+  **后端不可用** 与 **重试**，不会静默用 mock 替代真实数据
+
+在 GUI 中打开：重启 `dsh web`（client bundle 在启动时被发现），然后点击侧边栏书本形 **Literature** 入口。
 
 ## 测试
 
