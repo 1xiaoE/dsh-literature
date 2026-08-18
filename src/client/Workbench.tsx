@@ -139,7 +139,7 @@ export function Workbench({ controller: _controller }: WorkbenchProps) {
         </div>
         <div className={CSS.bottomRow}>
           <CategoriesPanel api={api} categories={categories} active={activeCategory} onSelect={setActiveCategory} onChanged={categoriesChanged} />
-          <PapersPanel papers={papers} selectedId={selectedId} onSelect={setSelectedId} loading={papersLoading} api={api} onImported={(paperId) => { setActiveCategory('all'); setSelectedId(paperId); setRetryKey((value) => value + 1) }} />
+          <PapersPanel papers={papers} selectedId={selectedId} onSelect={setSelectedId} loading={papersLoading} api={api} onImported={(paperId) => { setActiveCategory('all'); setSelectedId(paperId); setRetryKey((value) => value + 1) }} retrievedMode={activeCategory === 'all' || activeCategory === ''} onChanged={() => { setRetryKey((value) => value + 1) }} />
           <PaperDetailPanel key={detail?.id ?? 'none'} detail={detail} loading={detailLoading} api={api} fields={categories.filter((category) => category.kind === 'field')} onChanged={categoriesChanged} />
         </div>
       </div>

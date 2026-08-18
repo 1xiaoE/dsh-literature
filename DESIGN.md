@@ -264,3 +264,15 @@ interface SourceAdapter {
 8. headless CLI 无 GUI 可用（OS cron 可调）。
 
 **非目标（V0.1）**：GUI cron、Semantic Scholar、Zotero、PDF 视觉理解。
+
+## 11. Library / Retrieved-pool 分离（DB v18）
+
+**核心不变式**：`检索到过 ≠ 进入知识库`。
+
+- **已检索池（Retrieved）**：`papers` 行 + `retrievals` / `candidates` 历史——候选/搜索历史池，可删除。
+- **知识库（Library）**：`isLibraryPaper(db, paperId)` 为真——Selected / 手动导入 PDF / 有 PDF・fulltext・read・report / 收藏 / manual category。Read/report/favorite 只可能因论文已入库而存在，作为旧数据兼容保护。
+- **研究领域/主题只统计 Library**：`listResearchFields` 的 count 与 `listCategories` 的 topic 计数均 JOIN `libraryPaperExistsSql('p')`；`listPapers` 的 field 过滤加 Library 限制。仅检索候选永不污染 Research Fields / Topics。
+- **分类触发时机**：`resolvePaperFields` 仅对 Library 论文分类；对仅检索论文清理其历史 auto 分类（保留 manual）。触发点：`markAcquisitionOutcome(outcome=SELECTED)`、`importLocalPdf` 成功、`upsertPaper`（内部自行判断）。
+- **安全删除检索记录**：`removeRetrievedRecordSafely` / `removeRetrievedBatch` 只删 `retrievals` 与（非 SELECTED 的）`candidates`；**SELECTED 候选行保留**（它是论文入库凭证，删除即丢失 Selected 状态）。Library 论文的 PDF / fulltext / reads / report / categories / favorite 永不随检索历史删除。`isPaperOrphaned`（无剩余引用 + 非 Library + 无 open user action）为真才清理 `papers` 行。批量删除逐条保护检查，绝不 `DELETE FROM papers WHERE id IN (...)`，返回 `removedRetrievedCount / protectedLibraryCount / orphanPaperDeletedCount / failedCount`。
+- **收藏**：`papers.is_favorite INTEGER NOT NULL DEFAULT 0`（v18 迁移），`togglePaperFavorite` 切换；favorites 分类 = `is_favorite=1`；收藏即 Library 成员（受孤立清理保护），与论文分类联动（收藏论文出现在详情面板分类与领域统计）。
+- **旧数据 backfill**：v18 迁移执行 `cleanRetrievedOnlyAutoCategories`——删除仅检索论文的 auto 分类（保留 manual 与全部 Library 论文分类），幂等。

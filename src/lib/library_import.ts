@@ -11,6 +11,7 @@ import type { PaperRow } from '../db.js'
 import { getPaper, getPaperByDoi, upsertPaper } from '../db.js'
 import { extractPdfText } from '../fetch/fulltext.js'
 import type { LiteratureRuntime } from './runtime.js'
+import { resolvePaperFields } from './research_fields.js'
 import { canonicalId, normalizeTitle, type PaperRef } from '../sources/types.js'
 
 const PDF_MAGIC = Buffer.from('%PDF-')
@@ -256,6 +257,9 @@ export async function importLocalPdf(rt: LiteratureRuntime, input: LocalPdfInput
     `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, pdf_source, sha256, access_type, is_open_access)
      VALUES (?, ?, 'PDF_OK', ?, 'Manual Upload', ?, 'manual', 0)`,
   ).run(paperId, JSON.stringify([{ source: 'manual_upload', filename, status: 'ok' }]), managedPath, sha256)
+  // Library entry point: a manually imported PDF belongs to the knowledge
+  // base and is auto-classified into Research Fields right away.
+  resolvePaperFields(rt.db, paperId)
   const saved = getPaper(rt.db, paperId)!
   return { paperId, isNewPaper: existing === null, duplicateDetected: false, pdfAttached: true, sha256,
     metadata: { title: saved.title, authors: authorsOf(saved), venue: saved.venue, year: saved.year, doi: saved.doi },

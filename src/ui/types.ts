@@ -43,6 +43,10 @@ export interface UiPaperSummary {
   reportCount: number
   topic: string | null
   createdAt: string | null
+  /** true when the paper is bookmarked (first-class library signal). */
+  favorite?: boolean
+  /** true when the paper belongs to the formal library (selected/import/pdf/read/report/favorite/manual category). */
+  isLibrary?: boolean
 }
 
 /** Right-hand Paper Details payload. */
@@ -100,6 +104,8 @@ export interface UiStageSummary {
 
 export interface UiDashboard {
   paperCount: number
+  /** papers that actually entered the formal library (not just retrieved). */
+  libraryCount: number
   pushCount: number
   reportCount: number
   categories: UiCategory[]
@@ -148,6 +154,15 @@ export interface UiPushStatus {
   errorCode: string | null
   errorDetail: string | null
   running: boolean
+  /**
+   * True when a 'running' push has had no persisted activity (retrievals /
+   * progress columns) for longer than the staleness window — usually the
+   * headless runner died without finalizing. The UI should warn instead of
+   * showing a frozen "retrieving".
+   */
+  staleRunning: boolean
+  /** Newest persisted activity timestamp (retrieval row or push start). */
+  lastActivityAt: string | null
   retrieving: UiRetrievalLine[]
   retrievedPapers: number | null
   candidatesRanked: number | null

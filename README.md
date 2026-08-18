@@ -13,6 +13,10 @@ This is a **pure plugin / workflow source repository**: no personal reading libr
 - **Verified full-text reading** — legal PDF fallback chain with %PDF- / size / sha256 validation, chunked token-safe reading, and reading-coverage provenance (`total_chunks / read_chunks / read_coverage / coverage_basis`)
 - **Human-in-the-loop** — five-part action records, resume from the original step, 0-LLM deterministic finalize when possible
 - **Harness UI** — a **Literature** sidebar entry opens the Literature Workflow page (Execution / Search Keywords / Categories / Papers / Paper Details); a pure presentation layer over the existing SQLite
+- **Retrieved pool vs Library** — "retrieved" (检索到过) is explicitly NOT "in the library": every paper ever surfaced by retrieval/candidate generation lives in the **Retrieved** pool (candidate/search-history), while the **Library** is only papers the user owns — Selected by the workflow, manual PDF imports, or papers with real content (PDF / read / report / favorite / manual category)
+- **Library-scoped Research Fields** — Research Fields & Topics count and filter only library papers; retrieved-only candidates never pollute classification; auto category resolution triggers on SELECTED / manual import, not on mere retrieval
+- **Safe retrieved removal** — the Retrieved page supports single & batch removal of retrieval history; library papers are protected (their Selected / PDF / read / report / categories / favorite state is never touched), and only genuinely orphaned retrieved-only metadata can be cleaned up
+- **Favorites** — a first-class library signal (`papers.is_favorite`), linked to paper categories; favorites appear in the workflow count, protect papers from orphan cleanup, and toggle from the paper detail panel
 - **Library organization** — research-field categories, local PDF import, and pushless deep-read, all with full SQLite provenance
 
 ## Architecture
@@ -102,6 +106,28 @@ Independent of workflow topics: `categories` / `paper_categories` organize the l
 - **Local PDF import** — drop a PDF into the library (binary upload via `/api/dsh-literature/import-pdf`); metadata is completed through the existing source adapters (`lookupMetadata`, DOI-preferred) without creating a push
 - **Deep read** — re-read an already-library-owned PDF pushlessly (`/papers/:id/deep-read`), reusing the full-text index / chunk reads / report storage
 - **Reports table** — every workflow or deep-read report is recorded (`reports`), and reading jobs track `paper_reading_jobs` status
+
+## Library vs Retrieved Pool
+
+"检索到过" ≠ "进入知识库"。
+
+```
+               RETRIEVED POOL (候选/历史池)
+                      │
+        ┌─────────────┴─────────────┐
+        │                           │
+   未选择候选                    SELECTED
+        │                           │
+        │                           ▼
+        │                        LIBRARY ──► Auto Category ──► Research Fields
+        │
+        └── 可以清理（孤立检索论文）
+```
+
+- **Retrieved**（`已检索`, UI 左侧第一个分类）：历史检索 / 候选生成中发现过的论文——`papers` 行 + `retrievals` / `candidates` 历史。它本质是候选池 / 搜索历史，不是正式知识库。
+- **Library**（正式知识库）：`isLibraryPaper` 为真的论文——**Selected**（`candidates.selection_outcome='SELECTED'`）、**手动导入 PDF**（`fetch_log.access_type IN ('manual','manual_upload')`）、有可用 PDF / fulltext / read / report、**收藏**（`papers.is_favorite=1`）、或带 **manual category**。Read/report/favorite 行只可能因论文已入库而存在，因此作为旧数据兼容保护条件。
+- **Research Fields / Topics 只统计 Library**：Retrieved-only 论文不参与自动分类、不进入研究领域与长期主题统计。`resolvePaperFields` 仅在论文进入知识库时（SELECTED / 手动导入）触发；对 Retrieved-only 论文会清理其历史 auto 分类。
+- **安全删除检索记录**：`已检索` 页面支持单条 / 批量删除。删除只移除 `retrievals` 与（非 SELECTED 的）`candidates` 历史——Library 论文的 Selected / PDF / 精读 / 报告 / 分类 / 收藏全部保留；SELECTED 候选行是论文的入库凭证，被保留。只有真正孤立的 Retrieved-only 论文（`isPaperOrphaned`：无剩余引用、非 Library、无 open user action）才可清理其 `papers` 行。批量删除逐条执行保护检查，绝不 `DELETE FROM papers WHERE id IN (...)`，并返回 `removedRetrievedCount / protectedLibraryCount / orphanPaperDeletedCount / failedCount`。
 
 ## Curriculum
 

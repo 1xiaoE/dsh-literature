@@ -16,11 +16,14 @@ import { createReadStream } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import {
+  bulkRemoveRetrieved,
   getDashboard,
   getPaperDetail,
   getPushStatus,
   latestRunnerLog,
   listPapers,
+  removeRetrieved,
+  setPaperFavorite,
   canResumePush,
   startResume,
   startPush,
@@ -328,6 +331,35 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
           const result = startDeepRead(deps.getRt(), deepReadMatch[1]!)
           if (!result.started) { err(res, result.errorCode === 'ALREADY_RUNNING' || result.errorCode === 'ALREADY_COMPLETE' ? 409 : 404, result.errorCode ?? 'DEEP_READ_NOT_AVAILABLE'); return }
           writeJson(res, 202, { ok: true, paperId: deepReadMatch[1]!, status: 'running' })
+          return
+        }
+        const favoriteMatch = /^\/papers\/([^/]+)\/favorite$/.exec(rest)
+        if (favoriteMatch !== null) {
+          if (!guard(req, res, 'POST')) return
+          try {
+            const result = setPaperFavorite(deps.getRt().db, favoriteMatch[1]!)
+            writeJson(res, 200, result)
+          } catch (error) { categoryError(res, error) }
+          return
+        }
+        const retrievedMatch = /^\/retrieved\/([^/]+)$/.exec(rest)
+        if (retrievedMatch !== null) {
+          if (!guard(req, res, 'DELETE')) return
+          try {
+            writeJson(res, 200, removeRetrieved(deps.getRt().db, retrievedMatch[1]!))
+          } catch (error) { categoryError(res, error) }
+          return
+        }
+        if (rest === '/retrieved/bulk-remove' && guard(req, res, 'POST')) {
+          const body = await readJsonBody(req)
+          const paperIds = Array.isArray(body?.paperIds) ? body.paperIds.filter((x): x is string => typeof x === 'string' && x.length > 0) : []
+          if (paperIds.length === 0) {
+            err(res, 400, 'missing paperIds array')
+            return
+          }
+          try {
+            writeJson(res, 200, bulkRemoveRetrieved(deps.getRt().db, paperIds))
+          } catch (error) { categoryError(res, error) }
           return
         }
         if (rest.startsWith('/papers/') && guard(req, res, 'GET')) {

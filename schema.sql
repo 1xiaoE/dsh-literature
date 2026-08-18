@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS papers (
   affiliation      TEXT,
   keywords         TEXT,                          -- JSON array when extracted/enriched
   metadata_enriched_at TEXT,
+  is_favorite          INTEGER NOT NULL DEFAULT 0, -- first-class library signal (favorites)
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -242,4 +243,4 @@ CREATE TABLE IF NOT EXISTS paper_reading_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_paper_reading_jobs_status ON paper_reading_jobs(status);
 
-PRAGMA user_version = 17;
+PRAGMA user_version = 18;

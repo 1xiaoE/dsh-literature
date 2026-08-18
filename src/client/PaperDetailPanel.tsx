@@ -39,6 +39,7 @@ function doiUrl(doi: string): string {
 
 export function PaperDetailPanel({ detail, loading, api, fields, onChanged }: PaperDetailPanelProps) {
   const [favoriteMessage, setFavoriteMessage] = useState<string | null>(null)
+  const [favoriteBusy, setFavoriteBusy] = useState(false)
   const [addingField, setAddingField] = useState(false)
   const [fieldId, setFieldId] = useState<number | null>(null)
   const [fieldMessage, setFieldMessage] = useState<string | null>(null)
@@ -114,9 +115,22 @@ export function PaperDetailPanel({ detail, loading, api, fields, onChanged }: Pa
           )}
           {needsRead && api !== undefined && <button type="button" className={`${CSS.button} ${CSS.buttonPrimary}`} disabled={deepReadStarting || detail.readingStatus === 'running'} onClick={() => { void deepRead() }}>{deepReadStarting || detail.readingStatus === 'running' ? t('detail.deepReading') : t('detail.deepRead')}</button>}
           {detail.metadataStatus === 'partial' && api !== undefined && <button type="button" className={`${CSS.button} ${CSS.buttonGhost}`} disabled={enriching} onClick={() => { void enrich() }}>{enriching ? t('detail.enrichingMetadata') : t('detail.enrichMetadata')}</button>}
-          <button type="button" className={`${CSS.button} ${CSS.buttonGhost}`} onClick={() => { setFavoriteMessage(t('detail.favoriteUnavailable')) }}>
-            {t('detail.favorite')}
-          </button>
+          {api !== undefined && (
+            <button
+              type="button"
+              className={`${CSS.button} ${CSS.buttonGhost}`}
+              disabled={favoriteBusy}
+              onClick={() => {
+                setFavoriteBusy(true); setFavoriteMessage(null)
+                void api.toggleFavorite(detail.id)
+                  .then(() => { onChanged?.() })
+                  .catch((error) => { setFavoriteMessage(error instanceof Error ? error.message : String(error)) })
+                  .finally(() => { setFavoriteBusy(false) })
+              }}
+            >
+              {detail.favorite ? `★ ${t('detail.favoriteRemove')}` : `☆ ${t('detail.favorite')}`}
+            </button>
+          )}
         </div>
         {favoriteMessage !== null && <p className={CSS.searchMessage}>{favoriteMessage}</p>}
       </header>

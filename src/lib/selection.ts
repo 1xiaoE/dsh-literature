@@ -1,6 +1,7 @@
 import type { LiteratureConfig } from '../config.js'
 import type { Db } from '../db.js'
 import { agentFinalScore } from './ranking.js'
+import { resolvePaperFields } from './research_fields.js'
 
 export interface SemanticScoreEntry {
   paperId: string
@@ -271,4 +272,7 @@ export function markAcquisitionOutcome(
        selection_rejection_reason = COALESCE(?, selection_rejection_reason)
      WHERE push_id = ? AND paper_id = ?`,
   ).run(outcome, reason ?? null, selectionOutcome, reason ?? null, pushId, paperId)
+  // Library entry point: a SELECTED paper enters the knowledge base and is
+  // auto-classified into Research Fields. Retrieved-only candidates stay out.
+  if (outcome === 'SELECTED') resolvePaperFields(db, paperId)
 }

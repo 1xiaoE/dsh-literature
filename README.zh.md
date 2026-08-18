@@ -13,6 +13,10 @@
 - **全文验证阅读** — 合法 PDF 回退链 + %PDF- / 大小 / sha256 校验、分块 token 安全阅读、阅读覆盖率溯源（`total_chunks / read_chunks / read_coverage / coverage_basis`）
 - **Human-in-the-loop** — 五要素用户待办、从原步骤恢复、可确定性时 0-LLM 收口
 - **Harness UI** — 侧边栏 **Literature** 入口打开 Literature Workflow 页面（Execution / Search Keywords / Categories / Papers / Paper Details）；纯表现层，直接读取现有 SQLite
+- **已检索池 vs 知识库** — 「检索到过」不等于「进入知识库」：历史检索 / 候选生成发现过的论文都在**已检索（Retrieved）**池（候选/搜索历史）；**知识库（Library）**只含用户真正拥有的论文——工作流 Selected、手动导入 PDF、或有实际内容（PDF / 精读 / 报告 / 收藏 / 人工分类）
+- **知识库范围的研究领域** — 研究领域与研究主题只统计、只筛选知识库论文；仅被检索的候选永不污染分类；自动分类在 SELECTED / 手动导入时触发，而非检索时
+- **安全删除检索记录** — 已检索页面支持单条 / 批量删除检索历史；知识库论文受保护（其 Selected / PDF / 精读 / 报告 / 分类 / 收藏一律不动），只有真正孤立的检索论文元数据可被清理
+- **收藏** — 一等知识库信号（`papers.is_favorite`），与论文分类联动；计入工作流计数、保护论文免于孤立清理、可在论文详情面板切换
 - **文献库组织** — 研究领域分类、本地 PDF 导入、无推送深读（deep-read），全量 SQLite 溯源
 
 ## 架构
@@ -102,6 +106,28 @@ Rank #1 → 质量门通过？→ public/OA 链（arXiv / OpenAlex OA / Unpaywal
 - **本地 PDF 导入** — 直接导入 PDF 入库存档（`/api/dsh-literature/import-pdf` 二进制上传）；元数据经现有源适配器补全（`lookupMetadata`，优先 DOI），不创建 push
 - **Deep read** — 对已有 PDF 无推送重读（`/papers/:id/deep-read`），复用全文索引 / 分块阅读 / 报告存储
 - **报告表** — 每次工作流或 deep-read 报告都记录到 `reports`；阅读任务状态见 `paper_reading_jobs`
+
+## 知识库与已检索池
+
+「检索到过」≠「进入知识库」。
+
+```
+              已检索池 RETRIEVED（候选/历史池）
+                      │
+        ┌─────────────┴─────────────┐
+        │                           │
+   未选择候选                    SELECTED
+        │                           │
+        │                           ▼
+        │                     知识库 LIBRARY ──► 自动分类 ──► 研究领域
+        │
+        └── 可以清理（孤立检索论文）
+```
+
+- **已检索（Retrieved，UI 左侧第一个分类）**：历史检索 / 候选生成中发现过的论文——`papers` 行 + `retrievals` / `candidates` 历史。它本质是候选池 / 搜索历史，不是正式知识库。
+- **知识库（Library）**：`isLibraryPaper` 为真的论文——**Selected**（`candidates.selection_outcome='SELECTED'`）、**手动导入 PDF**（`fetch_log.access_type IN ('manual','manual_upload')`）、有可用 PDF / fulltext / read / report、**收藏**（`papers.is_favorite=1`）、或带 **manual category**。Read/report/favorite 行只可能因论文已入库而存在，因此作为旧数据兼容保护条件。
+- **研究领域 / 研究主题只统计知识库**：仅被检索的候选不参与自动分类、不进研究领域与长期主题统计。`resolvePaperFields` 仅在论文进入知识库时（SELECTED / 手动导入）触发；对仅检索论文会清理其历史 auto 分类。
+- **安全删除检索记录**：`已检索` 页面支持单条 / 批量删除。删除只移除 `retrievals` 与（非 SELECTED 的）`candidates` 历史——知识库论文的 Selected / PDF / 精读 / 报告 / 分类 / 收藏全部保留；SELECTED 候选行是论文的入库凭证，被保留。只有真正孤立的仅检索论文（`isPaperOrphaned`：无剩余引用、非知识库、无 open user action）才可清理其 `papers` 行。批量删除逐条执行保护检查，绝不 `DELETE FROM papers WHERE id IN (...)`，并返回 `removedRetrievedCount / protectedLibraryCount / orphanPaperDeletedCount / failedCount`。
 
 ## 课程（Curriculum）
 

@@ -19,6 +19,15 @@ import type { LiteratureConfig } from '../config.js'
 import type { LiteratureRuntime } from '../lib/runtime.js'
 import { expandHome } from '../lib/paths.js'
 import { listPaperFields, listResearchFields } from '../lib/research_fields.js'
+import { libraryPaperExistsSql } from '../lib/library.js'
+import {
+  isPaperFavorite,
+  isLibraryPaper,
+  removeRetrievedBatch,
+  removeRetrievedRecordSafely,
+  togglePaperFavorite,
+  type RemoveRetrievedBatchResult,
+} from '../lib/library.js'
 import type {
   UiAcquisitionLine,
   UiCategory,
@@ -33,9 +42,14 @@ import type {
   UiUserAction,
 } from './types.js'
 
-/** Workflow categories backed by real data (favorites has no column yet). */
+/**
+ * Workflow categories backed by real data. `all` is the Retrieved pool:
+ * every paper ever surfaced by retrieval/candidate generation — a transient
+ * candidate/search-history pool, NOT the formal library. Favorites are a
+ * real first-class library signal backed by papers.is_favorite.
+ */
 const WORKFLOW_CATEGORIES: Array<{ id: string; label: string }> = [
-  { id: 'all', label: 'All Papers' },
+  { id: 'all', label: 'Retrieved' },
   { id: 'selected', label: 'Selected' },
   { id: 'to-read', label: 'To Read' },
   { id: 'read', label: 'Read' },
@@ -76,7 +90,8 @@ const PAPER_SUMMARY_COLUMNS = `
   (SELECT j.status FROM paper_reading_jobs j WHERE j.paper_id = p.id) AS reading_status,
   (SELECT pu.report_path FROM pushes pu WHERE pu.paper_id = p.id AND pu.report_path IS NOT NULL AND pu.report_path <> '' ORDER BY pu.id DESC LIMIT 1) AS report_path,
   (SELECT MAX(pu.id) FROM pushes pu WHERE pu.paper_id = p.id AND pu.report_path IS NOT NULL AND pu.report_path <> '') AS report_push_id,
-  (SELECT topic FROM candidates c JOIN pushes pu ON pu.id = c.push_id WHERE c.paper_id = p.id ORDER BY pu.id DESC LIMIT 1) AS topic
+  (SELECT topic FROM candidates c JOIN pushes pu ON pu.id = c.push_id WHERE c.paper_id = p.id ORDER BY pu.id DESC LIMIT 1) AS topic,
+  p.is_favorite
 `
 
 interface PaperRow extends Record<string, unknown> {
@@ -100,6 +115,7 @@ interface PaperRow extends Record<string, unknown> {
   topic: string | null
   fulltext_chunks: number | null
   reading_status: 'running' | 'completed' | 'failed' | null
+  is_favorite: number | null
 }
 
 function usableFile(path: string | null): string | null {
@@ -200,7 +216,7 @@ function paperReportAsset(db: Db, paperId: string): (ReportAssetRow & { path: st
     .find((row): row is ReportAssetRow & { path: string } => row.path !== null)
 }
 
-function toSummary(row: PaperRow, pdfPath: string | null = usableFile(row.pdf_path), reportPath: string | null = usableFile(row.report_path)): UiPaperSummary {
+function toSummary(db: Db, row: PaperRow, pdfPath: string | null = usableFile(row.pdf_path), reportPath: string | null = usableFile(row.report_path)): UiPaperSummary {
   return {
     id: row.id,
     title: row.title,
@@ -220,6 +236,8 @@ function toSummary(row: PaperRow, pdfPath: string | null = usableFile(row.pdf_pa
     reportCount: reportPath === null ? 0 : 1,
     topic: row.topic,
     createdAt: row.created_at,
+    favorite: row.is_favorite === 1,
+    isLibrary: isLibraryPaper(db, row.id),
   }
 }
 
@@ -245,9 +263,7 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
   } else if (category === 'reports') {
     where.push("EXISTS (SELECT 1 FROM reports r WHERE r.paper_id=p.id) OR EXISTS (SELECT 1 FROM pushes pu WHERE pu.paper_id = p.id AND pu.report_path IS NOT NULL AND pu.report_path <> '')")
   } else if (category === 'favorites') {
-    // No favorites column in the schema yet (Phase 4); the UI shows an empty
-    // list instead of fabricating data.
-    where.push('1 = 0')
+    where.push('p.is_favorite = 1')
   } else if (category.startsWith('topic:')) {
     const topic = category.slice('topic:'.length)
     where.push(`EXISTS (
@@ -258,7 +274,8 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
   } else if (category.startsWith('field:')) {
     const categoryId = Number(category.slice('field:'.length))
     if (Number.isInteger(categoryId) && categoryId > 0) {
-      where.push("EXISTS (SELECT 1 FROM paper_categories pc WHERE pc.paper_id = p.id AND pc.category_id = ? AND pc.state = 'active')")
+      where.push(`EXISTS (SELECT 1 FROM paper_categories pc WHERE pc.paper_id = p.id AND pc.category_id = ? AND pc.state = 'active')
+        AND ${libraryPaperExistsSql('p')}`)
       params.push(String(categoryId))
     } else {
       where.push('1 = 0')
@@ -281,7 +298,7 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
   const papers = rows.map((row) => {
     const fetch = assets.pdf.get(row.id)
     const report = assets.report.get(row.id)
-    return { paper: toSummary(row, fetch?.path ?? null, report?.path ?? null), reportPushId: report?.id ?? 0 }
+    return { paper: toSummary(db, row, fetch?.path ?? null, report?.path ?? null), reportPushId: report?.id ?? 0 }
   })
   if (category === 'reports') {
     return papers
@@ -330,7 +347,7 @@ export function getPaperDetail(db: Db, id: string): UiPaperDetail | null {
   ).get(id) as { status: string | null; chunk_count: number | null } | undefined
 
   const report = paperReportAsset(db, id)
-  const base = toSummary(row, fetchAssets.usable?.path ?? null, report?.path ?? null)
+  const base = toSummary(db, row, fetchAssets.usable?.path ?? null, report?.path ?? null)
 
   return {
     ...base,
@@ -383,8 +400,10 @@ export function listCategories(db: Db): UiCategory[] {
           ? listPapers(db).filter((paper) => paper.hasPdf && (paper.readCoverage === null || paper.readCoverage === undefined || paper.readCoverage < 1)).length
         : w.id === 'read'
           ? scalarCount("SELECT COUNT(DISTINCT r.paper_id) AS n FROM fulltext_reads r WHERE NOT EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id=r.paper_id) OR EXISTS (SELECT 1 FROM fulltexts ft WHERE ft.paper_id=r.paper_id AND ft.status='ok' AND (SELECT COUNT(DISTINCT r2.seq) FROM fulltext_reads r2 WHERE r2.paper_id=ft.paper_id) >= ft.chunk_count)")
-          : w.id === 'reports'
-            ? reportCount
+        : w.id === 'reports'
+          ? reportCount
+          : w.id === 'favorites'
+            ? scalarCount('SELECT COUNT(*) AS n FROM papers WHERE is_favorite = 1')
             : 0
     categories.push({ id: w.id, label: w.label, kind: 'workflow', count: n })
   }
@@ -394,10 +413,13 @@ export function listCategories(db: Db): UiCategory[] {
       categoryId: field.id, createdBy: field.createdBy, kind: 'field', count: field.count,
     })
   }
-  // Real topics present in the pushes table.
+  // Real topics present in the pushes table — restricted to library papers:
+  // the candidate pool must never inflate Research Topics.
   const rows = db.prepare(
     `SELECT pu.topic, COUNT(DISTINCT c.paper_id) AS n
      FROM pushes pu JOIN candidates c ON c.push_id = pu.id
+     JOIN papers p ON p.id = c.paper_id
+     WHERE ${libraryPaperExistsSql('p')}
      GROUP BY pu.topic ORDER BY n DESC`,
   ).all() as unknown as CategoryRow[]
   for (const r of rows) {
@@ -424,12 +446,16 @@ function listStages(db: Db): UiStageSummary[] {
 /** Top-level dashboard aggregate. */
 export function getDashboard(db: Db): UiDashboard {
   const papers = db.prepare('SELECT COUNT(*) AS n FROM papers').get() as { n: number }
+  const library = db.prepare(
+    `SELECT COUNT(*) AS n FROM papers p WHERE ${libraryPaperExistsSql('p')}`,
+  ).get() as { n: number }
   const pushes = db.prepare('SELECT COUNT(*) AS n FROM pushes').get() as { n: number }
   const latest = db.prepare(
     `SELECT id, status, topic FROM pushes ORDER BY id DESC LIMIT 1`,
   ).get() as { id: number; status: string; topic: string } | undefined
   return {
     paperCount: papers.n,
+    libraryCount: library.n,
     pushCount: pushes.n,
     reportCount: countUsableReports(db),
     categories: listCategories(db),
@@ -437,6 +463,23 @@ export function getDashboard(db: Db): UiDashboard {
     stages: listStages(db),
   }
 }
+
+/** Remove one paper's retrieval/candidate history (safe, library-protected). */
+export function removeRetrieved(db: Db, paperId: string) {
+  return removeRetrievedRecordSafely(db, paperId)
+}
+
+/** Remove many papers' retrieval histories, per-paper protection checks. */
+export function bulkRemoveRetrieved(db: Db, paperIds: string[]): RemoveRetrievedBatchResult {
+  return removeRetrievedBatch(db, paperIds)
+}
+
+/** Toggle favorite membership (favorites are part of the library). */
+export function setPaperFavorite(db: Db, paperId: string) {
+  return togglePaperFavorite(db, paperId)
+}
+
+export { isPaperFavorite }
 
 interface PushRow extends Record<string, unknown> {
   id: number
@@ -513,6 +556,8 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
       errorCode: null,
       errorDetail: null,
       running: false,
+      staleRunning: false,
+      lastActivityAt: null,
       retrieving: [],
       retrievedPapers: null,
       candidatesRanked: null,
@@ -534,6 +579,17 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
     source: r.source_adapter,
     retrievedAt: r.retrieved_at,
   }))
+
+  // Stale-running detection: a 'running' push whose newest persisted activity
+  // (retrieval row, or the push start when nothing was written yet) is older
+  // than the window usually means the headless runner died without finalizing
+  // — surface it so the Execution panel warns instead of looking frozen.
+  const lastActivityAt = retrievals.map((r) => r.retrieved_at).sort().at(-1) ?? push.started_at
+  let staleRunning = false
+  if (push.status === 'running' && lastActivityAt !== null) {
+    const parsed = Date.parse(`${lastActivityAt.replace(' ', 'T')}Z`)
+    if (!Number.isNaN(parsed)) staleRunning = Date.now() - parsed > STALE_RUNNING_MS
+  }
 
   const retrievalCount = (db.prepare(
     'SELECT COUNT(DISTINCT paper_id) AS n FROM retrievals WHERE push_id = ?',
@@ -675,6 +731,8 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
     errorCode: push.error_code,
     errorDetail: push.error_detail,
     running: push.status === 'running',
+    staleRunning,
+    lastActivityAt,
     retrieving,
     retrievedPapers: retrievalCount > 0 ? retrievalCount : null,
     candidatesRanked: liveProgress.rankedCount > 0
@@ -750,6 +808,9 @@ export function canResumePush(db: Db, pushId: number): boolean {
 
 /** How long /run waits for an immediate runner crash before declaring it started. */
 export const RUNNER_GRACE_MS = 5000
+
+/** A 'running' push older than this with no persisted activity is stale. */
+export const STALE_RUNNING_MS = 10 * 60 * 1000
 
 /** Max chars of the runner log tail embedded in the failure message. */
 const FAILURE_TAIL_CHARS = 800

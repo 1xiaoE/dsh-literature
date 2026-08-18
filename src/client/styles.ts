@@ -11,7 +11,7 @@ export const CSS = {
   authCard: 'dsh-lit-auth-card', authTitle: 'dsh-lit-auth-title', authGrid: 'dsh-lit-auth-grid', authLabel: 'dsh-lit-auth-label', authValue: 'dsh-lit-auth-value',
   button: 'dsh-lit-button', buttonPrimary: 'dsh-lit-button-primary', buttonGhost: 'dsh-lit-button-ghost', input: 'dsh-lit-input',
   searchRow: 'dsh-lit-search-row', searchModes: 'dsh-lit-search-modes', searchMode: 'dsh-lit-search-mode', searchModeActive: 'dsh-lit-search-mode-active', searchMessage: 'dsh-lit-search-message', runnerLog: 'dsh-lit-runner-log',
-  paperCard: 'dsh-lit-paper-card', paperCardActive: 'dsh-lit-paper-card-active', paperTitle: 'dsh-lit-paper-title', paperMeta: 'dsh-lit-paper-meta', paperFlags: 'dsh-lit-paper-flags', flag: 'dsh-lit-flag',
+  paperCard: 'dsh-lit-paper-card', paperCardActive: 'dsh-lit-paper-card-active', paperTitle: 'dsh-lit-paper-title', paperMeta: 'dsh-lit-paper-meta', paperFlags: 'dsh-lit-paper-flags', flag: 'dsh-lit-flag', checkbox: 'dsh-lit-checkbox',
   categoryItem: 'dsh-lit-category-item', categoryItemActive: 'dsh-lit-category-item-active', categoryGroup: 'dsh-lit-category-group', categorySummary: 'dsh-lit-category-summary', categoryBody: 'dsh-lit-category-body', categoryRow: 'dsh-lit-category-row', categoryIcon: 'dsh-lit-category-icon', categoryLabel: 'dsh-lit-category-label', categoryCount: 'dsh-lit-category-count', categoryAdd: 'dsh-lit-category-add', categoryManage: 'dsh-lit-category-manage', categoryMenu: 'dsh-lit-category-menu', fieldForm: 'dsh-lit-field-form', fieldChips: 'dsh-lit-field-chips', fieldChip: 'dsh-lit-field-chip', fieldPicker: 'dsh-lit-field-picker',
   detailField: 'dsh-lit-detail-field', detailHeader: 'dsh-lit-detail-header', detailTitle: 'dsh-lit-detail-title', detailMeta: 'dsh-lit-detail-meta', detailActions: 'dsh-lit-detail-actions', detailSection: 'dsh-lit-detail-section', detailSectionTitle: 'dsh-lit-detail-section-title', detailLabel: 'dsh-lit-detail-label', detailValue: 'dsh-lit-detail-value', detailAbstract: 'dsh-lit-detail-abstract',
   backendBanner: 'dsh-lit-backend-banner', empty: 'dsh-lit-empty', footer: 'dsh-lit-footer',
@@ -273,6 +273,8 @@ html[data-dsh-literature-active]:not([data-dsh-taskboard-active]):not([data-dsh-
 .${CSS.flag}[data-kind='pdf'] { color: var(--dsh-lit-purple); background: rgba(125,102,185,.11); border-color: rgba(169,155,216,.18); }
 .${CSS.flag}[data-kind='read'] { color: var(--dsh-lit-teal); background: rgba(54,148,139,.1); border-color: rgba(113,198,188,.18); }
 .${CSS.flag}[data-kind='report'] { color: var(--dsh-lit-warning); background: rgba(181,128,43,.1); border-color: rgba(221,181,110,.18); }
+.${CSS.flag}[data-kind='favorite'] { color: #e8b64c; background: rgba(232,182,76,.12); border-color: rgba(232,182,76,.22); }
+.${CSS.checkbox} { width: 14px; height: 14px; margin: 0 6px 0 0; accent-color: var(--dsh-lit-accent); cursor: pointer; vertical-align: -2px; }
 
 .${CSS.details} { padding: 0 11px 12px; overflow-y: auto; }
 .${CSS.detailHeader} { padding: 2px 0 10px; border-bottom: 1px solid var(--dsh-lit-border); }

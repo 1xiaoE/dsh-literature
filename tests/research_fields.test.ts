@@ -26,12 +26,17 @@ function close(t: { db: Db; dir: string }): void {
   rmSync(t.dir, { recursive: true, force: true })
 }
 
+/** Seed a library paper: upsert + manual PDF record, so it is classified. */
 function paper(db: Db, id: string, title: string, abstract = ''): void {
   upsertPaper(db, {
     id, title, abstract, authors: '[]', venue: null, year: 2026, doi: null,
     arxiv_id: null, openalex_id: null, url: null, oa_pdf_url: null,
     citations: null, bibtex: null, metadata_source: 'test',
   })
+  db.prepare(
+    `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, access_type, is_open_access)
+     VALUES (?, '[]', 'PDF_OK', '/tmp/unused.pdf', 'manual', 0)`,
+  ).run(id)
 }
 
 describe('research fields', () => {
@@ -74,6 +79,9 @@ describe('research fields', () => {
     const t = tempDb()
     try {
       paper(t.db, 'paper:robot', 'Robust quadruped locomotion control with reinforcement learning')
+      // The paper is now a library paper (manual PDF attached); classification
+      // is triggered by the library entry point (SELECTED / manual import).
+      resolvePaperFields(t.db, 'paper:robot')
       const initial = listPaperFields(t.db, 'paper:robot')
       expect(initial.map((field) => field.slug)).toEqual(expect.arrayContaining(['robotics', 'control', 'reinforcement-learning']))
       resolvePaperFields(t.db, 'paper:robot')
@@ -115,6 +123,7 @@ describe('research fields', () => {
     const t = tempDb()
     try {
       paper(t.db, 'paper:estimation', 'Visual-inertial state estimation for quadruped robots')
+      resolvePaperFields(t.db, 'paper:estimation')
       backfillResearchFields(t.db)
       backfillResearchFields(t.db)
       const state = listResearchFields(t.db).filter((field) => field.slug === 'state-estimation')

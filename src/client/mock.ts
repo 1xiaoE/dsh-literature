@@ -23,6 +23,8 @@ export const MOCK_PAPERS: UiPaperSummary[] = [
     reportCount: 1,
     topic: '足式机器人控制',
     createdAt: '2026-08-01 09:00:00',
+    favorite: true,
+    isLibrary: true,
   },
   {
     id: 'arxiv:2110.00195',
@@ -175,14 +177,16 @@ const MOCK_DETAIL: UiPaperDetail = {
 
 export const MOCK_DASHBOARD: UiDashboard = {
   paperCount: MOCK_PAPERS.length,
+  libraryCount: 8,
   pushCount: 17,
   reportCount: 3,
   categories: [
-    { id: 'all', label: 'All Papers', kind: 'workflow', count: MOCK_PAPERS.length },
+    { id: 'all', label: 'Retrieved', kind: 'workflow', count: MOCK_PAPERS.length },
     { id: 'selected', label: 'Selected', kind: 'workflow', count: 3 },
+    { id: 'to-read', label: 'To Read', kind: 'workflow', count: 2 },
     { id: 'read', label: 'Read', kind: 'workflow', count: 4 },
     { id: 'reports', label: 'Reports', kind: 'workflow', count: 3 },
-    { id: 'favorites', label: 'Favorites', kind: 'workflow', count: 0 },
+    { id: 'favorites', label: 'Favorites', kind: 'workflow', count: 1 },
     { id: 'field:1', categoryId: 1, label: 'Robotics', labelEn: 'Robotics', labelZh: '机器人学', kind: 'field', count: 8, createdBy: 'system' },
     { id: 'field:2', categoryId: 2, label: 'Agricultural Robotics', labelEn: 'Agricultural Robotics', labelZh: '农业机器人', kind: 'field', count: 0, createdBy: 'system' },
     { id: 'field:3', categoryId: 3, label: 'Agricultural Engineering', labelEn: 'Agricultural Engineering', labelZh: '农业工程', kind: 'field', count: 0, createdBy: 'system' },
@@ -211,6 +215,8 @@ export const MOCK_PUSH_STATUS: UiPushStatus = {
   errorCode: null,
   errorDetail: null,
   running: true,
+  staleRunning: false,
+  lastActivityAt: '2026-08-17 09:13:02',
   retrieving: [
     { source: 'OpenAlex', retrievedAt: '2026-08-17 09:12:31' },
     { source: 'arXiv', retrievedAt: '2026-08-17 09:12:58' },
@@ -241,6 +247,8 @@ export const MOCK_AUTH_STATUS: UiPushStatus = {
   label: 'AUTH_REQUIRED',
   rawStatus: 'auth_required',
   running: false,
+  staleRunning: false,
+  lastActivityAt: '2026-08-16 09:13:02',
   startedAt: '2026-08-16 09:12:00',
   acquisition: [
     {

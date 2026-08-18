@@ -96,7 +96,7 @@ export class LiteratureApi {
         if (category === 'selected') return MOCK_PAPERS.filter((p) => p.selected)
         if (category === 'read') return MOCK_PAPERS.filter((p) => p.readCount > 0)
         if (category === 'reports') return MOCK_PAPERS.filter((p) => p.reportCount > 0)
-        if (category === 'favorites') return []
+        if (category === 'favorites') return MOCK_PAPERS.filter((p) => p.favorite)
         return MOCK_PAPERS
       },
     )
@@ -195,6 +195,36 @@ export class LiteratureApi {
   removePaperField(paperId: string, categoryId: number): Promise<void> {
     return fetch(`${BASE}/papers/${encodeURIComponent(paperId)}/categories/${categoryId}`, { method: 'DELETE' })
       .then((response) => readJson<{ ok: true }>(response)).then(() => undefined)
+  }
+
+  /** Remove one paper's retrieval/candidate history (library papers are protected). */
+  removeRetrieved(paperId: string): Promise<{
+    paperId: string
+    removedRetrieved: boolean
+    protectedLibrary: boolean
+    orphanDeleted: boolean
+    alreadyClean: boolean
+  }> {
+    return fetch(`${BASE}/retrieved/${encodeURIComponent(paperId)}`, { method: 'DELETE' })
+      .then((response) => readJson<{ paperId: string; removedRetrieved: boolean; protectedLibrary: boolean; orphanDeleted: boolean; alreadyClean: boolean }>(response))
+  }
+
+  /** Batch-remove retrieval histories with per-paper protection checks. */
+  bulkRemoveRetrieved(paperIds: string[]): Promise<{
+    removedRetrievedCount: number
+    protectedLibraryCount: number
+    orphanPaperDeletedCount: number
+    failedCount: number
+  }> {
+    return fetch(`${BASE}/retrieved/bulk-remove`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paperIds }),
+    }).then((response) => readJson<{ removedRetrievedCount: number; protectedLibraryCount: number; orphanPaperDeletedCount: number; failedCount: number }>(response))
+  }
+
+  /** Toggle favorite membership (favorites are part of the library). */
+  toggleFavorite(paperId: string): Promise<{ paperId: string; favorite: boolean }> {
+    return fetch(`${BASE}/papers/${encodeURIComponent(paperId)}/favorite`, { method: 'POST' })
+      .then((response) => readJson<{ paperId: string; favorite: boolean }>(response))
   }
 
   /** Reserved for a future persistent translation cache; never calls an LLM today. */

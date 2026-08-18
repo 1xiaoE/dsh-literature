@@ -35,6 +35,10 @@ export interface UiPaperSummary {
   reportCount: number
   topic: string | null
   createdAt: string | null
+  /** true when the paper is bookmarked (first-class library signal). */
+  favorite?: boolean
+  /** true when the paper belongs to the formal library (selected/import/pdf/read/report/favorite/manual category). */
+  isLibrary?: boolean
 }
 
 export interface UiPaperDetail extends UiPaperSummary {
@@ -91,6 +95,8 @@ export interface UiStageSummary {
 
 export interface UiDashboard {
   paperCount: number
+  /** papers that actually entered the formal library (not just retrieved). */
+  libraryCount: number
   pushCount: number
   reportCount: number
   categories: UiCategory[]
@@ -138,6 +144,9 @@ export interface UiPushStatus {
   errorCode: string | null
   errorDetail: string | null
   running: boolean
+  /** 'running' push with no persisted activity for a long time (runner died). */
+  staleRunning: boolean
+  lastActivityAt: string | null
   retrieving: UiRetrievalLine[]
   retrievedPapers: number | null
   candidatesRanked: number | null

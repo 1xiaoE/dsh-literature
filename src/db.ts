@@ -5,9 +5,9 @@
  */
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
-import { backfillResearchFields, resolvePaperFields } from './lib/research_fields.js'
+import { backfillResearchFields, cleanRetrievedOnlyAutoCategories, resolvePaperFields } from './lib/research_fields.js'
 
-export const SCHEMA_VERSION = 17
+export const SCHEMA_VERSION = 18
 
 export type Db = DatabaseSync
 
@@ -594,6 +594,19 @@ INSERT INTO reports (paper_id, report_path, source, created_at, updated_at)
   WHERE paper_id IS NOT NULL AND report_path IS NOT NULL AND report_path <> ''
   ON CONFLICT(paper_id) DO UPDATE SET report_path=excluded.report_path, source='workflow', updated_at=excluded.updated_at;
 `)
+  }
+  if (version < 18) {
+    // Library / Retrieved-pool separation. `is_favorite` is a first-class
+    // library membership signal (favorites are linked to paper categories).
+    // Retrieved-only candidates auto-classified by pre-separation versions
+    // have their auto categories removed — the candidate pool must never
+    // pollute Research Fields. Manual categories and all library papers are
+    // preserved.
+    const paperCols = db.prepare('PRAGMA table_info(papers)').all() as Array<{ name: string }>
+    if (!paperCols.some((c) => c.name === 'is_favorite')) {
+      db.exec('ALTER TABLE papers ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;')
+    }
+    cleanRetrievedOnlyAutoCategories(db)
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`)
 }

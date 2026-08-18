@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { openDb, upsertPaper, type Db } from '../src/db.js'
+import { resolvePaperFields } from '../src/lib/research_fields.js'
 import {
   formatRunnerFailure,
   getDashboard,
@@ -105,23 +106,32 @@ describe('ui adapter — papers', () => {
       expect(first.hasPdf).toBe(true)
       expect(first.readCount).toBe(1)
       expect(first.topic).toBe('足式机器人控制')
+      expect(first.isLibrary).toBe(true)
 
       const selected = listPapers(t.db, { category: 'selected' })
       expect(selected.map((p) => p.id)).toEqual(['arxiv:2401.001'])
       const read = listPapers(t.db, { category: 'read' })
       expect(read).toHaveLength(1)
+      // Retrieved-only paper (no library content): it is NOT auto-classified
+      // and therefore does NOT appear under its research field filter.
       const agricultural = listCategories(t.db).find((category) => category.labelEn === 'Agricultural Robotics')!
-      expect(listPapers(t.db, { category: agricultural.id }).map((p) => p.id)).toEqual(['arxiv:2301.002'])
+      expect(agricultural.count).toBe(0)
+      expect(listPapers(t.db, { category: agricultural.id })).toEqual([])
     } finally {
       close(t)
     }
   })
 
-  it('returns empty favorites (no schema column yet — no fabricated data)', () => {
+  it('returns favorites only for papers flagged is_favorite (real schema column)', () => {
     const t = tempDb()
     try {
       seedPaper(t.db, 'arxiv:2401.001', 'Some Paper', 2024, null)
       expect(listPapers(t.db, { category: 'favorites' })).toEqual([])
+      t.db.prepare('UPDATE papers SET is_favorite = 1 WHERE id = ?').run('arxiv:2401.001')
+      const favs = listPapers(t.db, { category: 'favorites' })
+      expect(favs.map((paper) => paper.id)).toEqual(['arxiv:2401.001'])
+      expect(favs[0]!.favorite).toBe(true)
+      expect(favs[0]!.isLibrary).toBe(true)
     } finally {
       close(t)
     }
@@ -233,6 +243,10 @@ describe('ui adapter — categories & dashboard', () => {
       seedPaper(t.db, 'arxiv:2301.002', 'Agricultural Robot Harvesting', 2023, 'ICRA')
       seedPush(t.db, 1, '足式机器人控制', 'completed')
       seedCandidate(t.db, 1, 'arxiv:2401.001', 1, 'SELECTED')
+      // The agricultural paper is only retrieved (candidate pool) — it must
+      // NOT appear in Research Fields. Promote the quadruped paper into its
+      // field via manual category so it shows up as a library paper.
+      resolvePaperFields(t.db, 'arxiv:2401.001')
 
       const categories = listCategories(t.db)
       const ids = categories.map((c) => c.id)
@@ -241,7 +255,8 @@ describe('ui adapter — categories & dashboard', () => {
       const robotics = categories.find((category) => category.kind === 'field' && category.labelEn === 'Robotics')!
       const agricultural = categories.find((category) => category.kind === 'field' && category.labelEn === 'Agricultural Robotics')!
       expect(robotics.id).toMatch(/^field:/)
-      expect(agricultural.count).toBeGreaterThan(0)
+      // Retrieved-only paper never counts toward Research Fields.
+      expect(agricultural.count).toBe(0)
       expect(ids).toContain('topic:足式机器人控制')
       const all = categories.find((c) => c.id === 'all')!
       expect(all.count).toBe(2)
@@ -251,6 +266,7 @@ describe('ui adapter — categories & dashboard', () => {
 
       const dash = getDashboard(t.db)
       expect(dash.paperCount).toBe(2)
+      expect(dash.libraryCount).toBe(1)
       expect(dash.pushCount).toBe(1)
       expect(dash.latestPush).toEqual({ id: 1, status: 'completed', topic: '足式机器人控制' })
       expect(dash.stages).toEqual([])
@@ -607,6 +623,34 @@ describe('ui adapter — runner env scrub and spawn failure detail', () => {
       expect(result.pid).toBeNull()
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('ui adapter — stale running detection', () => {
+  it('flags a running push with no recent persisted activity as stale', () => {
+    const t = tempDb()
+    try {
+      seedPaper(t.db, 'arxiv:2401.001', 'Some Paper', 2024, null)
+      seedPush(t.db, 30, 'control', 'running')
+      // started_at = datetime('now') → recent, not stale
+      expect(getPushStatus(t.db).staleRunning).toBe(false)
+      // Backdate beyond the staleness window → stale.
+      t.db.prepare(`UPDATE pushes SET started_at = datetime('now', '-20 minutes') WHERE id = 30`).run()
+      const stale = getPushStatus(t.db)
+      expect(stale.staleRunning).toBe(true)
+      expect(stale.lastActivityAt).not.toBeNull()
+      // A fresh retrieval row means the runner is alive → not stale.
+      t.db.prepare(
+        `INSERT INTO retrievals (push_id, paper_id, generated_query, source_adapter, candidate_pool)
+         VALUES (30, 'arxiv:2401.001', 'q', 'OpenAlex', 'recent')`,
+      ).run()
+      expect(getPushStatus(t.db).staleRunning).toBe(false)
+      // A completed push is never stale.
+      t.db.prepare(`UPDATE pushes SET status = 'completed' WHERE id = 30`).run()
+      expect(getPushStatus(t.db).staleRunning).toBe(false)
+    } finally {
+      close(t)
     }
   })
 })

@@ -105,13 +105,16 @@ function pushStatus(phase: UiPushStatus['phase']): UiPushStatus {
 const api = {
   run: async () => ({ ok: true, message: 'started' }),
   resume: async () => ({ ok: true, message: 'resumed' }),
+  toggleFavorite: async () => ({ paperId: 'doi:10.1000/test', favorite: true }),
+  bulkRemoveRetrieved: async () => ({ removedRetrievedCount: 1, protectedLibraryCount: 0, orphanPaperDeletedCount: 0, failedCount: 0 }),
+  importPdf: async () => ({ paperId: 'doi:10.1000/test' }),
 } as never
 
 beforeEach(() => { setLanguage('en-US', undefined) })
 
 describe('Paper Detail', () => {
   it('renders title hierarchy, three populated sections and truthful actions', () => {
-    const html = renderToStaticMarkup(<PaperDetailPanel detail={detail} loading={false} />)
+    const html = renderToStaticMarkup(<PaperDetailPanel detail={detail} loading={false} api={api as never} />)
     expect(html).toContain('Fault-Tolerant Legged Locomotion')
     expect(html).toContain('IEEE RA-L · 2026')
     expect(html).toContain('Metadata')
@@ -188,7 +191,7 @@ describe('Papers and Categories', () => {
       />,
     )
     expect(html).toContain('工作流')
-    expect(html).toContain('全部论文')
+    expect(html).toContain('已检索')
     expect(html).toContain('研究领域')
     expect(html).toContain('机器人学')
     expect(html).not.toContain('All Papers')

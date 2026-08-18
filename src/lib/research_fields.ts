@@ -2,8 +2,14 @@
  * Research-field organization is deliberately separate from workflow topics:
  * fields organize the paper library; pushes/stages/ranking retain their own
  * curriculum topic semantics. All classification is deterministic and local.
+ *
+ * Library scope: only papers that actually entered the knowledge base
+ * (Selected / manual import / has PDF / read / report / favorite / manual
+ * category — see lib/library.ts) are auto-classified and counted. Papers
+ * merely retrieved (candidate-pool only) never pollute Research Fields.
  */
 import type { Db } from '../db.js'
+import { isLibraryPaper, libraryPaperExistsSql } from './library.js'
 
 export type FieldSource = 'auto' | 'manual'
 export interface ResearchField {
@@ -116,7 +122,9 @@ export function createResearchField(db: Db, input: FieldInput): ResearchField {
 export function listResearchFields(db: Db): ResearchField[] {
   const rows = db.prepare(
     `SELECT c.id, c.slug, c.name_en, c.name_zh, c.created_by, COUNT(pc.paper_id) AS count
-     FROM categories c LEFT JOIN paper_categories pc ON pc.category_id = c.id AND pc.state = 'active'
+     FROM categories c
+     LEFT JOIN paper_categories pc ON pc.category_id = c.id AND pc.state = 'active'
+     LEFT JOIN papers p ON p.id = pc.paper_id AND ${libraryPaperExistsSql('p')}
      WHERE c.type = 'field' GROUP BY c.id ORDER BY c.name_en COLLATE NOCASE`,
   ).all() as unknown as FieldRow[]
   return rows.map(mapField)
@@ -238,11 +246,22 @@ export function deleteResearchField(db: Db, id: number, mode: 'detach' | 'move',
 
 function confidence(matchCount: number): number { return Math.min(.96, .76 + Math.max(0, matchCount - 1) * .08) }
 
-/** Classify one saved paper; manual active/excluded rows are never altered. */
+/**
+ * Classify one paper. Library papers get auto fields; retrieved-only
+ * candidates are skipped entirely (and any stale auto assignment from
+ * earlier versions is removed) so the candidate pool never pollutes
+ * Research Fields. Manual active/excluded rows are never altered.
+ */
 export function resolvePaperFields(db: Db, paperId: string): void {
   ensureResearchFieldSeeds(db)
   const paper = db.prepare('SELECT title, abstract, venue FROM papers WHERE id = ?').get(paperId) as { title: string; abstract: string | null; venue: string | null } | undefined
   if (paper === undefined) return
+  if (!isLibraryPaper(db, paperId)) {
+    // Retrieved-only candidate: no auto classification. Purge any stale auto
+    // rows a pre-separation version may have written; manual intent survives.
+    db.prepare("DELETE FROM paper_categories WHERE paper_id = ? AND source = 'auto'").run(paperId)
+    return
+  }
   const topic = db.prepare(
     `SELECT pu.topic FROM candidates c JOIN pushes pu ON pu.id = c.push_id
      WHERE c.paper_id = ? ORDER BY pu.id DESC LIMIT 1`,
@@ -283,4 +302,20 @@ export function backfillResearchFields(db: Db): void {
   ensureResearchFieldSeeds(db)
   const papers = db.prepare('SELECT id FROM papers').all() as Array<{ id: string }>
   for (const paper of papers) resolvePaperFields(db, paper.id)
+}
+
+/**
+ * Library-scope backfill for pre-separation data: removes auto category
+ * assignments of retrieved-only papers that never entered the library.
+ * Manual assignments and everything attached to library papers are kept.
+ * Returns the number of auto relations cleaned. Relation-idempotent.
+ */
+export function cleanRetrievedOnlyAutoCategories(db: Db): number {
+  ensureResearchFieldSeeds(db)
+  const result = db.prepare(
+    `DELETE FROM paper_categories WHERE source = 'auto' AND paper_id IN (
+       SELECT p.id FROM papers p WHERE NOT ${libraryPaperExistsSql('p')}
+     )`,
+  ).run()
+  return Number(result.changes)
 }
