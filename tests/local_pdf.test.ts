@@ -88,6 +88,11 @@ describe('local PDF import', () => {
     try {
       // enrich: true with a registry that cannot resolve anything — the import
       // must remain valid but the enriched flag must stay false.
+      Object.assign(rt, {
+        registry: {
+          lookupMetadata: async () => { throw new Error('provider unavailable') },
+        },
+      })
       const result = await importLocalPdf(rt, {
         filename: 'unresolvable.pdf', mimeType: 'application/pdf',
         bytes: pdf(`Unresolvable Local Paper\nAbstract\n${'unknown topic words '.repeat(20)}`),

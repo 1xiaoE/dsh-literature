@@ -218,6 +218,9 @@ pnpm test        # vitest
 pnpm watch       # tsdown --watch (client bundle HMR)
 ```
 
+PDF text extraction uses Poppler's `pdftotext`. Install the `poppler-utils`
+package on Debian/Ubuntu (the CI workflow installs it before running tests).
+
 ## Tests
 
 PDF fallback chains, per-domain rate limiting, publisher-browser login-wall classification (AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND), %PDF- / size / sha256 validation, manual PDF cut-in (source file moved into the library), institutional/manual provenance (`is_open_access=false`), chunking, ranking (OA decoupled from quality), stage/graduation gates, priority-goal matching, HITL + resume (no re-retrieval/re-ranking), report writer + deterministic finalize, OpenAlex auth isolation, arXiv scheduler/dedup/429, migrations (fresh init + v13→v14 manual provenance, v15 acquisition state, v17 library organization), UI adapter / routes / client view-model + components, and the lossless-JSON output boundary.
@@ -230,6 +233,29 @@ PDF fallback chains, per-domain rate limiting, publisher-browser login-wall clas
 
 Zotero integration · more sources · GUI scheduling · PDF vision understanding.
 
-## License
+## License and content rights
 
-License not specified yet.
+The source code in this repository is released under the [MIT License](LICENSE).
+It is provided “as is”, without warranty; retain the copyright and license
+notice when copying substantial portions of the code. The complete, controlling
+license text is in [`LICENSE`](LICENSE).
+
+This project also handles material owned by third parties. Metadata, abstracts,
+publisher pages, PDFs, and supplementary files remain subject to the terms and
+rights of their respective providers, publishers, authors, and other
+rightsholders. `Manual Upload` / local import records provenance only; it does
+not grant access rights or make a document open access.
+
+- Import, download, read, and share only documents you are legally entitled to
+  access. Respect institutional subscriptions, author-sharing terms, provider
+  terms of service, rate limits, and copyright restrictions.
+- Do not use the browser/login flow to bypass access controls, share credentials,
+  or redistribute non-open-access PDFs. The project intentionally asks users to
+  complete lawful authentication themselves.
+- Reports and summaries are research aids, not a substitute for the source.
+  Verify facts, cite the original work, and check the applicable license before
+  quoting, publishing, or redistributing content.
+
+Third-party dependencies retain their own licenses. Review their notices and
+the relevant package metadata before distributing a derivative build. This
+section is an operational notice, not legal advice.

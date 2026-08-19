@@ -215,6 +215,9 @@ pnpm test        # vitest
 pnpm watch       # tsdown --watch（client bundle HMR）
 ```
 
+PDF 文本提取依赖 Poppler 的 `pdftotext`。Debian/Ubuntu 请安装
+`poppler-utils`；CI 会在测试前自动安装该软件包。
+
 ## 测试
 
 Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（RATE_LIMITED）、publisher-browser 登录墙分类（AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND）、%PDF- / 大小 / sha256 校验、手动 PDF 剪切入库（源文件移入知识库）、机构/手动 provenance（`is_open_access=false`）、分块、排序（OA 与质量解耦）、阶段/毕业门槛、priority-goal 匹配、HITL + 恢复（不重检索/重排序）、报告写入 + 确定性收口、OpenAlex 认证隔离、arXiv 调度/去重/429、迁移（空库初始化 + v13→v14 手动 provenance、v15 acquisition state、v17 文献库组织）、UI adapter / routes / client view-model + 组件、lossless-JSON 输出边界。
@@ -227,6 +230,22 @@ Quality-First Rank 硬状态机、PDF 回退链、per-domain 非滑动限流（R
 
 Zotero 集成 · 更多检索源 · GUI 调度 · PDF 视觉理解。
 
-## License
+## 许可与内容权利
 
-License not specified yet.
+本仓库的源代码以 [MIT License](LICENSE) 发布，按“原样”提供且不提供担保；
+复制代码的重要部分时，请保留版权与许可声明。完整且具有约束力的许可文本
+见 [`LICENSE`](LICENSE)。
+
+本项目还会处理第三方材料。元数据、摘要、出版社页面、PDF 与补充材料的
+权利及使用条件，仍分别受其提供方、出版社、作者或其他权利人的约束。
+`手动导入` / 本地导入只记录来源，不授予访问权，也不代表文档为开放获取。
+
+- 仅导入、下载、阅读和分享你依法有权访问的文档；遵守机构订阅、作者分享
+  条款、服务商条款、访问频率限制与版权限制。
+- 不得借助浏览器/登录流程绕过访问控制、共享凭据，或再分发非开放获取 PDF。
+  项目刻意要求用户自行完成合法认证。
+- 报告与摘要仅用于辅助研究，不能替代原始文献。引用、发布或再分发内容前，
+  请核实事实、引用原作，并确认适用的许可条件。
+
+第三方依赖仍适用其各自许可证；分发衍生构建前请查阅相应声明和包元数据。
+本节是操作与权利提示，不构成法律意见。

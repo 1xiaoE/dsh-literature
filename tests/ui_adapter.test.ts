@@ -533,7 +533,7 @@ describe('ui adapter — runner launch (log capture + early-exit detection)', ()
   it('returns ok=false with stderr tail when the runner dies inside the grace window', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-run-'))
     try {
-      const result = await runCli(process.execPath, ['-e', "console.error('BOOT_FAIL'); process.exit(3)"], {
+      const result = await runCli(process.execPath, ['-e', "require('node:fs').writeSync(2, 'BOOT_FAIL\\n'); process.exit(3)"], {
         logDir: join(dir, 'runs'),
         graceMs: 3000,
       })

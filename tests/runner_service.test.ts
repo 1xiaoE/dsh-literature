@@ -23,7 +23,7 @@ describe('runner service', () => {
     const t = tempEnv()
     try {
       const service = new RunnerService(t.db, { dataDir: t.dir, graceMs: 2000 })
-      const out = await service.start('push', ['-e', "console.error('BOOT_FAIL'); process.exit(3)"], { bin: process.execPath })
+      const out = await service.start('push', ['-e', "require('node:fs').writeSync(2, 'BOOT_FAIL\\n'); process.exit(3)"], { bin: process.execPath })
       expect(out.ok).toBe(false)
       expect(out.runId).toBe(1)
       expect(out.message).toContain('exit code 3')

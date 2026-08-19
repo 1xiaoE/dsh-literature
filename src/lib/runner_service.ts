@@ -88,6 +88,21 @@ function toRow(row: RunnerJob): RunnerJobRecord {
   }
 }
 
+/**
+ * Complete a captured child-process log before reading it.  `exit` can fire
+ * before a piped WriteStream has flushed its final stderr chunk, which used to
+ * hide the useful failure line from the UI.
+ */
+function closeLog(log: WriteStream | undefined): Promise<void> {
+  if (log === undefined || log.destroyed || log.writableFinished) return Promise.resolve()
+  return new Promise((resolve) => {
+    const done = (): void => resolve()
+    log.once('finish', done)
+    log.once('error', done)
+    try { log.end() } catch { resolve() }
+  })
+}
+
 export class RunnerService {
   private readonly db: Db
   private readonly options: Required<Pick<RunnerServiceOptions, 'graceMs' | 'cwd'>> & { logDir: string | null }
@@ -159,11 +174,20 @@ export class RunnerService {
     this.persistHeartbeat(runId)
 
     let log: WriteStream | undefined
+    let capturedOutput = ''
+    const captureOutput = (chunk: Buffer | string): void => {
+      capturedOutput = `${capturedOutput}${chunk.toString()}`.slice(-FAILURE_TAIL_CHARS)
+    }
     if (logPath !== null) {
       log = createWriteStream(logPath)
       child.stdout?.pipe(log)
       child.stderr?.pipe(log)
     }
+    // Keep a small in-memory tail as well as the durable log. This is the
+    // authoritative early-exit detail after `close`, while the file remains
+    // the durable UI log for a live runner.
+    child.stdout?.on('data', captureOutput)
+    child.stderr?.on('data', captureOutput)
     const finish = (status: RunnerStatus, exitCode: number | null, message: string | null): void => {
       this.active.delete(runId)
       this.db.prepare(
@@ -174,7 +198,10 @@ export class RunnerService {
 
     const earlyExit = await new Promise<{ code: number | null; signal: string | null; spawnError?: string } | null>((resolve) => {
       const timer = setTimeout(() => resolve(null), this.options.graceMs)
-      child.once('exit', (code, signal) => { clearTimeout(timer); resolve({ code, signal }) })
+      // `close`, unlike `exit`, waits until the stdio pipes have closed. That
+      // prevents an immediate crash from being recorded before its stderr has
+      // reached the log/captured tail.
+      child.once('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal }) })
       child.once('error', (error) => {
         clearTimeout(timer)
         const detail = error instanceof Error
@@ -184,11 +211,15 @@ export class RunnerService {
       })
     })
     if (earlyExit !== null) {
-      if (log !== undefined) { try { log.end() } catch { /* closed */ } }
+      await closeLog(log)
       if (earlyExit.code !== 0) {
         const message = earlyExit.spawnError !== undefined
           ? `runner spawn failed: ${earlyExit.spawnError}`
-          : formatRunnerFailure(earlyExit.code, earlyExit.signal, logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : '')
+          : formatRunnerFailure(
+            earlyExit.code,
+            earlyExit.signal,
+            capturedOutput || (logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''),
+          )
         finish(earlyExit.spawnError !== undefined ? 'failed' : 'exited', earlyExit.code, message)
         return { ok: false, runId, pid, logPath, message }
       }

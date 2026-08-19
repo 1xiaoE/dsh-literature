@@ -17,6 +17,8 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Install PDF tools
+        run: sudo apt-get update && sudo apt-get install --yes poppler-utils
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Typecheck
