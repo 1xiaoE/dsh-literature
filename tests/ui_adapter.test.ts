@@ -694,7 +694,7 @@ describe('ui adapter — runner env scrub and spawn failure detail', () => {
       OPENALEX_API_KEY: 'sk-live-123',
       MY_SECRET_TOKEN: 'shh',
       PATH: '/usr/bin',
-      HOME: '/home/eternal',
+      HOME: '/tmp/dsh-lit-home',
       PLAIN: 'value',
     })
     expect(env.DSH_SESSION_ID).toBeUndefined()
@@ -703,7 +703,7 @@ describe('ui adapter — runner env scrub and spawn failure detail', () => {
     expect(env.MY_SECRET_TOKEN).toBeUndefined()
     expect(env.OPENALEX_API_KEY).toBe('sk-live-123')
     expect(env.PATH).toBe('/usr/bin')
-    expect(env.HOME).toBe('/home/eternal')
+    expect(env.HOME).toBe('/tmp/dsh-lit-home')
     expect(env.PLAIN).toBe('value')
   })
 
