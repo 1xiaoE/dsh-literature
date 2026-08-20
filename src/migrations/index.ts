@@ -26,6 +26,7 @@ import up018 from './018_library_pool.js'
 import up019 from './019_indexes_invariants.js'
 import up020 from './020_reports_version_history.js'
 import up021 from './021_runner_jobs.js'
+import up022 from './022_runner_error_contract.js'
 
 export interface Migration {
   version: number
@@ -54,4 +55,5 @@ export const migrations: Migration[] = [
   { version: 19, up: up019 },
   { version: 20, up: up020 },
   { version: 21, up: up021 },
+  { version: 22, up: up022 },
 ].sort((a, b) => a.version - b.version)

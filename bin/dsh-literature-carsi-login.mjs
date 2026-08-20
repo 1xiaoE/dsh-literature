@@ -5,7 +5,7 @@
  * 首次使用（或 AUTH_REQUIRED 之后）：
  *   node bin/dsh-literature-carsi-login.mjs
  * 会以 headed 浏览器打开 CARSI 门户，使用**独立持久 profile**
- * （默认 ~/.local/share/dsh-literature/browser-profile/，绝不读取日常浏览器
+ * （默认 ~/dsh-literature/Data/browser-profile/，绝不读取日常浏览器
  * 的 Cookie）。完成学校统一身份认证登录后回到终端按 Enter 结束；
  * 会话由后续 headless 推送自动复用。
  *
@@ -24,8 +24,7 @@ import { DEFAULT_CARSI_USER_AGENT } from '../lib/config.js'
 import { openDb } from '../lib/db.js'
 import { resolveUserActionsByKind } from '../lib/lib/user_actions.js'
 
-const XDG = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share')
-const DEFAULT_DATA_DIR = join(XDG, 'dsh-literature')
+const DEFAULT_DATA_DIR = join(homedir(), 'dsh-literature', 'Data')
 const DEFAULT_PROFILE_DIR = join(DEFAULT_DATA_DIR, 'browser-profile')
 
 function parseArgs(argv) {
@@ -48,7 +47,7 @@ function parseArgs(argv) {
         'dsh-literature-carsi-login: CARSI 人工登录 / 会话检查。\n' +
           '  默认：headed 打开 CARSI 门户，登录完成后按 Enter 结束。\n' +
           '  --check         只检查会话状态，不打开浏览器。\n' +
-          '  --data-dir      数据目录（默认 XDG ~/.local/share/dsh-literature）。\n' +
+          '  --data-dir      数据目录（默认 ~/dsh-literature/Data）。\n' +
           '  --profile-dir   浏览器 profile 目录（默认 <data-dir>/browser-profile）。\n' +
           '  --timeout-min   登录等待上限分钟（默认 15）。\n' +
           '  --headless      调试用（headless 打开门户，无法人工输入）。',

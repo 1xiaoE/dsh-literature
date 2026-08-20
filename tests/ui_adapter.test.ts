@@ -12,6 +12,8 @@ import { openDb, upsertPaper, type Db } from '../src/db.js'
 import { resolvePaperFields } from '../src/lib/research_fields.js'
 import {
   formatRunnerFailure,
+  createCurrentProfileWorkflowRunner,
+  currentHarnessProfile,
   getDashboard,
   getPaperDetail,
   getPushStatus,
@@ -132,6 +134,32 @@ describe('ui adapter — papers', () => {
       expect(favs.map((paper) => paper.id)).toEqual(['arxiv:2401.001'])
       expect(favs[0]!.favorite).toBe(true)
       expect(favs[0]!.isLibrary).toBe(true)
+    } finally {
+      close(t)
+    }
+  })
+
+  it('lists downloaded papers in the library and separates known access types', () => {
+    const t = tempDb()
+    try {
+      seedPaper(t.db, 'paper:oa', 'Open Paper', 2026, 'Open Journal')
+      seedPaper(t.db, 'paper:closed', 'Closed Paper', 2025, 'Closed Journal')
+      const oaPath = join(t.dir, 'oa.pdf')
+      const closedPath = join(t.dir, 'closed.pdf')
+      writeFileSync(oaPath, '%PDF-1.4 oa')
+      writeFileSync(closedPath, '%PDF-1.4 closed')
+      t.db.prepare(
+        `INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, access_type, is_open_access)
+         VALUES (?, '[]', 'PDF_OK', ?, 'oa', 1), (?, '[]', 'PDF_OK', ?, 'manual', 0)`,
+      ).run('paper:oa', oaPath, 'paper:closed', closedPath)
+
+      const categories = listCategories(t.db)
+      expect(categories.find((category) => category.id === 'library')?.count).toBe(2)
+      expect(categories.find((category) => category.id === 'open-access')).toBeUndefined()
+      expect(categories.find((category) => category.id === 'non-open-access')).toBeUndefined()
+      expect(listPapers(t.db, { category: 'library' }).map((paper) => paper.id)).toEqual(['paper:oa', 'paper:closed'])
+      expect(listPapers(t.db, { category: 'library' }).find((paper) => paper.id === 'paper:oa')?.isOpenAccess).toBe(true)
+      expect(listPapers(t.db, { category: 'library' }).find((paper) => paper.id === 'paper:closed')?.isOpenAccess).toBe(false)
     } finally {
       close(t)
     }
@@ -315,6 +343,29 @@ describe('ui adapter — push status (Execution panel)', () => {
       expect(status.present).toBe(false)
       expect(status.phase).toBe('idle')
       expect(status.pushId).toBeNull()
+      expect(status.runner).toBeNull()
+    } finally {
+      close(t)
+    }
+  })
+
+  it('surfaces a runner failure even when the workflow exited before creating a push', () => {
+    const t = tempDb()
+    try {
+      t.db.prepare(
+        `INSERT INTO runner_jobs (kind, status, started_at, heartbeat_at, finished_at, exit_code, message, error_code, retryable, provider, model)
+         VALUES ('push', 'exited', datetime('now'), datetime('now'), datetime('now'), 1, '模型认证失败。', 'AUTH', 0, 'example-provider', 'example-model')`,
+      ).run()
+
+      const status = getPushStatus(t.db, defaultConfig())
+      expect(status.present).toBe(false)
+      expect(status.runner).toMatchObject({
+        status: 'exited',
+        errorCode: 'AUTH',
+        provider: 'example-provider',
+        model: 'example-model',
+        message: '模型认证失败。',
+      })
     } finally {
       close(t)
     }
@@ -521,6 +572,47 @@ describe('ui adapter — workflow launchers', () => {
   it('maps resume to --resume <pushId>', () => {
     expect(resumeCliArgs(9)).toEqual(['--resume', '9'])
   })
+
+  it('starts a UI push with the active profile selection instead of headless', async () => {
+    const t = tempDb()
+    try {
+      let finish: (() => void) | undefined
+      let created: { agentOptions?: { provider?: string; model?: string } } | undefined
+      const done = new Promise<void>((resolve) => { finish = resolve })
+      const runner = createCurrentProfileWorkflowRunner({
+        agentDefaultModel: { currentSelection: () => ({ provider: 'web-provider', model: 'web-model' }) },
+        agents: {
+          create: async (options) => {
+            created = options
+            return {
+              agent: {
+                followup: () => {},
+                whenIdle: async () => done,
+                session: { events: [] },
+              },
+              dispose: async () => {},
+            }
+          },
+        },
+      })
+      const out = await runner.startPush('contract layering', { db: t.db, dataDir: t.dir } as never)
+      expect(out).toMatchObject({ ok: true, provider: 'web-provider', model: 'web-model' })
+      expect(created).toMatchObject({ agentOptions: { provider: 'web-provider', model: 'web-model' } })
+
+      finish?.()
+      await new Promise((resolve) => setImmediate(resolve))
+    } finally {
+      close(t)
+    }
+  })
+
+  it('resolves a workflow profile without treating the web host as a one-shot runner', () => {
+    expect(currentHarnessProfile(['/node', '/dsh/bin.ts', '--profile', 'research'], {})).toBe('research')
+    expect(currentHarnessProfile(['/node', '/dsh/bin.ts', 'web'], {})).toBeUndefined()
+    expect(currentHarnessProfile(['/node', '/dsh/bin.ts', 'web'], { DSH_LITERATURE_PROFILE: 'research' })).toBe('research')
+    expect(currentHarnessProfile(['/node', '/dsh/bin.ts', 'web'], { DSH_LITERATURE_PROFILE: 'web' })).toBeUndefined()
+    expect(currentHarnessProfile(['/node', '/dsh/bin.ts'], { DSH_LITERATURE_PROFILE: 'from-env' })).toBe('from-env')
+  })
 })
 
 describe('ui adapter — runner launch (log capture + early-exit detection)', () => {
@@ -598,6 +690,7 @@ describe('ui adapter — runner env scrub and spawn failure detail', () => {
     const env = runnerChildEnv({
       DSH_SESSION_ID: 'session-1',
       DSH_WEB_URL: 'http://127.0.0.1:3080',
+      DSH_LITERATURE_PROFILE: 'research',
       OPENALEX_API_KEY: 'sk-live-123',
       MY_SECRET_TOKEN: 'shh',
       PATH: '/usr/bin',
@@ -606,6 +699,7 @@ describe('ui adapter — runner env scrub and spawn failure detail', () => {
     })
     expect(env.DSH_SESSION_ID).toBeUndefined()
     expect(env.DSH_WEB_URL).toBeUndefined()
+    expect(env.DSH_LITERATURE_PROFILE).toBe('research')
     expect(env.MY_SECRET_TOKEN).toBeUndefined()
     expect(env.OPENALEX_API_KEY).toBe('sk-live-123')
     expect(env.PATH).toBe('/usr/bin')

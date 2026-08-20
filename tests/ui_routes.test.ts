@@ -1,5 +1,5 @@
 import { once } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -72,6 +72,111 @@ function seedPaper(db: Db, id: string): void {
 }
 
 describe('UI routes', () => {
+  it('returns the current Harness model selection and provider-neutral model options', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const runtime = { db, cfg: defaultConfig() } as LiteratureRuntime
+      const route = makeUiRoutes({
+        getRt: () => runtime,
+        modelSelection: async () => ({
+          current: { provider: 'local-gateway', model: 'research-large' },
+          options: [{
+            provider: 'local-gateway',
+            providerName: 'Local Gateway',
+            models: [{ id: 'research-large', name: 'Research Large', description: 'Long context' }],
+          }],
+        }),
+      })
+      const response = new CaptureResponse()
+      await route.handler(request('GET', '/api/dsh-literature/model-selection'), response as unknown as ServerResponse)
+      expect(response.status).toBe(200)
+      expect(JSON.parse(response.text())).toEqual({
+        current: { provider: 'local-gateway', model: 'research-large' },
+        options: [{
+          provider: 'local-gateway',
+          providerName: 'Local Gateway',
+          models: [{ id: 'research-large', name: 'Research Large', description: 'Long context' }],
+        }],
+      })
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('persists a catalog model through the Harness selection writer', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const runtime = { db, cfg: defaultConfig() } as LiteratureRuntime
+      let saved: { provider: string; model: string } | undefined
+      const route = makeUiRoutes({
+        getRt: () => runtime,
+        modelSelection: async () => ({
+          current: { provider: 'p', model: 'old' },
+          options: [{ provider: 'p', providerName: 'Provider', models: [{ id: 'new', name: 'New' }] }],
+        }),
+        saveModelSelection: async input => {
+          saved = input
+          return { current: input, options: [{ provider: 'p', providerName: 'Provider', models: [{ id: 'new', name: 'New' }] }] }
+        },
+      })
+      const response = new CaptureResponse()
+      await route.handler(request('POST', '/api/dsh-literature/model-selection', JSON.stringify({ provider: 'p', model: 'new' }), { 'content-type': 'application/json' }), response as unknown as ServerResponse)
+      expect(response.status).toBe(200)
+      expect(saved).toEqual({ provider: 'p', model: 'new' })
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a model that is not present in the Harness catalog', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const runtime = { db, cfg: defaultConfig() } as LiteratureRuntime
+      const route = makeUiRoutes({
+        getRt: () => runtime,
+        modelSelection: async () => ({
+          current: { provider: 'p', model: 'old' },
+          options: [{ provider: 'p', providerName: 'Provider', models: [{ id: 'new', name: 'New' }] }],
+        }),
+      })
+      const response = new CaptureResponse()
+      await route.handler(request('POST', '/api/dsh-literature/model-selection', JSON.stringify({ provider: 'unknown', model: 'model' }), { 'content-type': 'application/json' }), response as unknown as ServerResponse)
+      expect(response.status).toBe(400)
+      expect(JSON.parse(response.text())).toMatchObject({ ok: false, errorCode: 'INVALID_MODEL', retryable: false, provider: null, model: null })
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('returns a structured failure when Harness refuses to save the selection', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const runtime = { db, cfg: defaultConfig() } as LiteratureRuntime
+      const route = makeUiRoutes({
+        getRt: () => runtime,
+        modelSelection: async () => ({
+          current: { provider: 'p', model: 'old' },
+          options: [{ provider: 'p', providerName: 'Provider', models: [{ id: 'new', name: 'New' }] }],
+        }),
+        saveModelSelection: async () => { throw new Error('settings write failed') },
+      })
+      const response = new CaptureResponse()
+      await route.handler(request('POST', '/api/dsh-literature/model-selection', JSON.stringify({ provider: 'p', model: 'new' }), { 'content-type': 'application/json' }), response as unknown as ServerResponse)
+      expect(response.status).toBe(500)
+      expect(JSON.parse(response.text())).toMatchObject({ ok: false, errorCode: 'NETWORK', retryable: true, provider: 'p', model: 'new' })
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('creates a bilingual field and assigns it to a paper through loopback routes', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
     const db = openDb(dir)
@@ -115,7 +220,7 @@ describe('UI routes', () => {
         () => { launches += 1; return { ok: true, message: 'started' } },
       )
       expect(response.status).toBe(400)
-      expect(JSON.parse(response.text())).toEqual({ error: 'invalid JSON body' })
+      expect(JSON.parse(response.text())).toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT', retryable: false, provider: null, model: null })
       expect(launches).toBe(0)
     } finally {
       db.close()
@@ -135,7 +240,7 @@ describe('UI routes', () => {
         () => { launches += 1; return { ok: true, message: 'started' } },
       )
       expect(response.status).toBe(400)
-      expect(JSON.parse(response.text())).toEqual({ error: 'invalid JSON body' })
+      expect(JSON.parse(response.text())).toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT', retryable: false, provider: null, model: null })
       expect(launches).toBe(0)
     } finally {
       db.close()
@@ -155,7 +260,26 @@ describe('UI routes', () => {
         () => { launches += 1; return { ok: true, message: 'started' } },
       )
       expect(response.status).toBe(409)
-      expect(JSON.parse(response.text())).toEqual({ error: 'WORKFLOW_ALREADY_RUNNING' })
+      expect(JSON.parse(response.text())).toMatchObject({ ok: false, errorCode: 'WORKFLOW_ALREADY_RUNNING', retryable: false, provider: null, model: null })
+      expect(launches).toBe(0)
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('requires the first run to provide a topic', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    let launches = 0
+    try {
+      const response = await invoke(
+        db,
+        request('POST', '/api/dsh-literature/run', JSON.stringify({ keyword: '' }), { 'content-type': 'application/json' }),
+        () => { launches += 1; return { ok: true, message: 'started' } },
+      )
+      expect(response.status).toBe(400)
+      expect(JSON.parse(response.text())).toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT', retryable: false, provider: null, model: null })
       expect(launches).toBe(0)
     } finally {
       db.close()
@@ -274,6 +398,29 @@ describe('UI routes', () => {
       const pdfResponse = await invoke(db, request('GET', `/api/dsh-literature/assets/pdf/${encodeURIComponent(doiId)}`))
       expect(pdfResponse.status).toBe(200)
       expect(pdfResponse.text()).toBe('%PDF-1.4 doi route')
+    } finally {
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('deletes selected library papers through the library bulk-delete route', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-routes-'))
+    const db = openDb(dir)
+    try {
+      const paperId = 'paper:library-delete'
+      seedPaper(db, paperId)
+      const pdf = join(dir, 'library-delete.pdf')
+      writeFileSync(pdf, '%PDF-1.4 library delete')
+      db.prepare("INSERT INTO fetch_log (paper_id, attempts, outcome, pdf_path, access_type) VALUES (?, '[]', 'PDF_OK', ?, 'manual')").run(paperId, pdf)
+      const runtime = { db, cfg: defaultConfig(), dataDir: dir } as LiteratureRuntime
+      const route = makeUiRoutes({ getRt: () => runtime })
+      const response = new CaptureResponse()
+      await route.handler(request('POST', '/api/dsh-literature/library/bulk-delete', JSON.stringify({ paperIds: [paperId] }), { 'content-type': 'application/json' }), response as unknown as ServerResponse)
+      expect(response.status).toBe(200)
+      expect(JSON.parse(response.text())).toEqual({ deletedCount: 1, notFoundCount: 0, failedCount: 0 })
+      expect(existsSync(pdf)).toBe(false)
+      expect(db.prepare('SELECT 1 FROM papers WHERE id = ?').get(paperId)).toBeUndefined()
     } finally {
       db.close()
       rmSync(dir, { recursive: true, force: true })

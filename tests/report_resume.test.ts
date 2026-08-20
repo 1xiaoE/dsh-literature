@@ -168,7 +168,7 @@ describe('F/G/H: deterministic resume (0-LLM finalize)', () => {
   it('new pushes can 0-LLM finalize from their persisted policy snapshot (CLI resume path)', async () => {
     const { rt, dir } = setup()
     const pushNow = defineLiteraturePushNow(() => rt, () => null)
-    const started = (await run(pushNow, {})) as { pushId: number }
+    const started = (await run(pushNow, { topic: 'legged_robot_control' })) as { pushId: number }
     const pushId = started.pushId
     const paperId = 'arxiv:2208.01787'
     await buildReadyPush(rt, pushId, paperId)

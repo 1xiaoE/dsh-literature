@@ -11,6 +11,8 @@ import type {
   UiPaperDetail,
   UiPaperSummary,
   UiPaperTranslation,
+  UiModelSelection,
+  UiModelSelectionInput,
   UiPushStatus,
   UiRunResult,
 } from './wire.ts'
@@ -26,9 +28,18 @@ const BASE = '/api/dsh-literature'
 declare const process: { env: { NODE_ENV?: string } }
 
 class LiteratureApiError extends Error {
-  constructor(message: string) {
+  readonly errorCode?: UiRunResult['errorCode']
+  readonly retryable?: boolean
+  readonly provider?: string | null
+  readonly model?: string | null
+
+  constructor(message: string, fields: Pick<UiRunResult, 'errorCode' | 'retryable' | 'provider' | 'model'> = {}) {
     super(message)
     this.name = 'LiteratureApiError'
+    this.errorCode = fields.errorCode
+    this.retryable = fields.retryable
+    this.provider = fields.provider
+    this.model = fields.model
   }
 }
 
@@ -40,10 +51,16 @@ async function readJson<T>(response: Response): Promise<T> {
     throw new LiteratureApiError(`HTTP ${response.status}: invalid JSON response`)
   }
   if (!response.ok) {
-    const message = typeof body === 'object' && body !== null && typeof (body as { error?: unknown }).error === 'string'
-      ? (body as { error: string }).error
-      : `HTTP ${response.status}`
-    throw new LiteratureApiError(message)
+    const failure = typeof body === 'object' && body !== null ? body as Partial<UiRunResult> & { error?: unknown } : {}
+    const message = typeof failure.message === 'string' ? failure.message
+      : typeof failure.error === 'string' ? failure.error
+        : `HTTP ${response.status}`
+    throw new LiteratureApiError(message, {
+      errorCode: failure.errorCode,
+      retryable: typeof failure.retryable === 'boolean' ? failure.retryable : undefined,
+      provider: typeof failure.provider === 'string' ? failure.provider : null,
+      model: typeof failure.model === 'string' ? failure.model : null,
+    })
   }
   return body as T
 }
@@ -54,6 +71,20 @@ export function fallbackMode(mode: string): 'demo' | 'unavailable' {
 }
 
 const buildMode = process.env.NODE_ENV ?? 'production'
+
+function runFailure(error: unknown): UiRunResult {
+  if (error instanceof LiteratureApiError) {
+    return {
+      ok: false,
+      errorCode: error.errorCode ?? 'NETWORK',
+      retryable: error.retryable ?? true,
+      provider: error.provider ?? null,
+      model: error.model ?? null,
+      message: error.message,
+    }
+  }
+  return { ok: false, errorCode: 'NETWORK', retryable: true, provider: null, model: null, message: error instanceof Error ? error.message : String(error) }
+}
 
 async function withFallback<T>(live: () => Promise<T>, demo: () => T): Promise<ApiResult<T>> {
   try {
@@ -93,6 +124,7 @@ export class LiteratureApi {
       () => fetch(`${BASE}/papers${query({ category })}`).then((r) => readJson<UiPaperSummary[]>(r)),
       () => {
         if (category === undefined || category === 'all') return MOCK_PAPERS
+        if (category === 'library') return MOCK_PAPERS.filter((p) => p.isLibrary)
         if (category === 'selected') return MOCK_PAPERS.filter((p) => p.selected)
         if (category === 'read') return MOCK_PAPERS.filter((p) => p.readCount > 0)
         if (category === 'reports') return MOCK_PAPERS.filter((p) => p.reportCount > 0)
@@ -118,15 +150,25 @@ export class LiteratureApi {
     )
   }
 
+  /** Read-only provider/model discovery from the active Harness profile. */
+  modelSelection(): Promise<UiModelSelection> {
+    return fetch(`${BASE}/model-selection`).then((response) => readJson<UiModelSelection>(response))
+  }
+
+  saveModelSelection(input: UiModelSelectionInput): Promise<UiModelSelection> {
+    return fetch(`${BASE}/model-selection`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }).then((response) => readJson<UiModelSelection>(response))
+  }
+
   run(keyword: string): Promise<UiRunResult> {
     return fetch(`${BASE}/run`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ keyword }),
-    }).then((r) => readJson<UiRunResult>(r)).catch((error) => ({
-      ok: false,
-      message: error instanceof Error ? error.message : String(error),
-    }))
+    }).then((r) => readJson<UiRunResult>(r)).catch(runFailure)
   }
 
   resume(pushId: number): Promise<UiRunResult> {
@@ -134,10 +176,7 @@ export class LiteratureApi {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ pushId }),
-    }).then((r) => readJson<UiRunResult>(r)).catch((error) => ({
-      ok: false,
-      message: error instanceof Error ? error.message : String(error),
-    }))
+    }).then((r) => readJson<UiRunResult>(r)).catch(runFailure)
   }
 
   /** Tail of the latest runner log (stderr/stdout capture), or null. */
@@ -219,6 +258,12 @@ export class LiteratureApi {
     return fetch(`${BASE}/retrieved/bulk-remove`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paperIds }),
     }).then((response) => readJson<{ removedRetrievedCount: number; protectedLibraryCount: number; orphanPaperDeletedCount: number; failedCount: number }>(response))
+  }
+
+  deleteLibraryPapers(paperIds: string[]): Promise<{ deletedCount: number; notFoundCount: number; failedCount: number }> {
+    return fetch(`${BASE}/library/bulk-delete`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paperIds }),
+    }).then((response) => readJson<{ deletedCount: number; notFoundCount: number; failedCount: number }>(response))
   }
 
   /** Toggle favorite membership (favorites are part of the library). */

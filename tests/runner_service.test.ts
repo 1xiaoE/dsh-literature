@@ -19,6 +19,29 @@ function tempEnv(): { db: Db; dir: string } {
 }
 
 describe('runner service', () => {
+  it('records the selected active-profile model for an in-process run', async () => {
+    const t = tempEnv()
+    try {
+      let finish: (() => void) | undefined
+      const done = new Promise<void>((resolve) => { finish = resolve })
+      const service = new RunnerService(t.db, { dataDir: t.dir })
+      const out = await service.startInProcess(
+        'push',
+        { provider: 'web-provider', model: 'web-model' },
+        async () => ({ done }),
+      )
+      expect(out).toMatchObject({ ok: true, provider: 'web-provider', model: 'web-model' })
+      expect(service.latestJob()).toMatchObject({ status: 'running', provider: 'web-provider', model: 'web-model' })
+
+      finish?.()
+      await new Promise((resolve) => setImmediate(resolve))
+      expect(service.latestJob()).toMatchObject({ status: 'exited', exitCode: 0 })
+    } finally {
+      t.db.close()
+      rmSync(t.dir, { recursive: true, force: true })
+    }
+  })
+
   it('persists a job row and reports an immediate crash with the real error', async () => {
     const t = tempEnv()
     try {
@@ -49,7 +72,7 @@ describe('runner service', () => {
       expect(service.latestJob()?.status).toBe('running')
       const second = await service.start('push', ['-e', 'process.exit(0)'], { bin: process.execPath })
       expect(second.ok).toBe(false)
-      expect(second.message).toBe('WORKFLOW_ALREADY_RUNNING')
+      expect(second.message).toBe('文献工作流已在运行。')
     } finally {
       t.db.close()
       rmSync(t.dir, { recursive: true, force: true })
@@ -93,5 +116,23 @@ describe('runner service', () => {
     expect(formatRunnerFailure(3, null, 'boom early\nmore')).toContain('exit code 3')
     expect(formatRunnerFailure(3, null, 'boom early\nmore')).toContain('boom early')
     expect(formatRunnerFailure(null, 'SIGTERM', '')).toContain('signal SIGTERM')
+  })
+
+  it('persists structured authentication failure details', async () => {
+    const t = tempEnv()
+    try {
+      const service = new RunnerService(t.db, { dataDir: t.dir, graceMs: 2000 })
+      const out = await service.start(
+        'push',
+        ['-e', "require('node:fs').writeSync(2, 'Authentication Fails, Your api key: secret is invalid\\n'); process.exit(1)"],
+        { bin: process.execPath },
+      )
+      expect(out).toMatchObject({ ok: false, errorCode: 'AUTH', retryable: false, provider: null, model: null })
+      expect(service.latestJob()).toMatchObject({ errorCode: 'AUTH', retryable: false, provider: null, model: null })
+      expect(out.message).not.toContain('secret')
+    } finally {
+      t.db.close()
+      rmSync(t.dir, { recursive: true, force: true })
+    }
   })
 })

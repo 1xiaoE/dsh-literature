@@ -4,7 +4,7 @@
 
 An AI-assisted literature reading and recommendation workflow built around DeepSeek Harness — staged curriculum learning, multi-source retrieval, verified full-text reading, knowledge-gap-aware ranking, and structured research notes.
 
-This is a **pure plugin / workflow source repository**: no personal reading library, no runtime data, no credentials. All runtime state lives locally under `~/.local/share/dsh-literature/` (see [Runtime Data](#runtime-data)).
+This is a **pure plugin / workflow source repository**: no personal reading library, no runtime data, no credentials. All runtime state lives locally under `~/dsh-literature/Data/` (see [Runtime Data](#runtime-data)).
 
 ## Features
 
@@ -29,7 +29,7 @@ topic → search (Recent + Landmark) → dedupe → pre-rank (Top 15)
 ```
 
 - **Model-agnostic**: the plugin never calls an LLM; intelligent steps are executed by the harness-routed agent.
-- **Data/code separation**: code here, runtime data in the XDG dir.
+- **Data/code separation**: source/build files live in the repository; runtime state lives only under `~/dsh-literature/Data/`.
 - **Plugin boundary**: installs as a DeepSeek Harness plugin; the harness core is never modified.
 
 ## Requirements
@@ -78,13 +78,33 @@ Read from the environment only — never stored in source, logs, SQLite, or Git.
 ## Usage
 
 ```sh
-node bin/dsh-literature-push.mjs --topic "足式机器人控制"   # one full push
+node bin/dsh-literature-push.mjs --profile <profile> --topic "<your topic>"  # first push: choose your own topic
+node bin/dsh-literature-push.mjs --profile <profile>                       # later pushes: reuse the persisted learning topic/stage
 node bin/dsh-literature-push.mjs --resume <pushId>          # resume (0-LLM when possible)
 node bin/dsh-literature-actions.mjs list | resolve <id>     # human-in-the-loop actions
 node bin/dsh-literature-browser-login.mjs --push <pushId>   # publisher login wall (HITL)
 node bin/dsh-literature-browser-login.mjs --url <article>   # login for a specific article page
 node bin/dsh-literature-browser-login.mjs --check           # browser session status
 ```
+
+The first fresh push must provide a topic. The plugin stores that topic with
+the push and later topic-less runs reuse its current learning stage; an
+explicit `--topic` switches the learning track. The selected Harness
+`--profile` owns the model adapter, provider, model, and credentials.
+
+When the Web UI is running, Literature starts a temporary Agent inside that
+same live Harness profile. It uses the provider and model currently selected
+in the Harness model dialog, with that profile's adapter and credentials. The
+plugin never supplies a provider, model, or credential and never switches
+providers after an error. The command-line runner remains separate: it uses
+`headless` unless `DSH_LITERATURE_PROFILE=<workflow-profile>` is set for a
+dedicated automation profile.
+
+The Literature workbench's model selector writes the chosen provider/model to
+the active Harness profile's default model setting. The next Web workflow uses
+that exact selection; a running workflow is not changed. Provider installation
+and credentials remain Harness-owned, and selecting an unavailable model
+returns `INVALID_MODEL` without falling back to another provider.
 
 > **Manual PDF cut-in**: when a login wall or rate limit blocks the automated browser, download the article PDF yourself to `~/Downloads` and hand the path to the agent — `literature_fetch_pdf(pushId, paperId, manualPdfPath=<path>)` validates it and **moves (剪切) it into the library** (`pdfs/<sha256>.pdf`), removing the source copy. See [Human-in-the-loop](#human-in-the-loop).
 
@@ -189,7 +209,7 @@ The manual PDF is recorded with `access_type=manual`, `is_open_access=0` (a priv
 ## Runtime Data
 
 ```
-~/.local/share/dsh-literature/
+~/dsh-literature/Data/
 ├── literature.db      # SQLite provenance (papers, pushes, categories, reports, …)
 ├── pdfs/<sha256>.pdf  # content-hashed downloads
 ├── cache/             # adapter caches

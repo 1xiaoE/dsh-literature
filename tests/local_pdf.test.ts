@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { normalizeConfig } from '../src/config.js'
 import { createRuntime } from '../src/lib/runtime.js'
-import { importLocalPdf } from '../src/lib/library_import.js'
+import { importLocalPdf, parseLocalMetadataText } from '../src/lib/library_import.js'
 import { runDeepRead, startDeepRead } from '../src/lib/deep_read.js'
 import { listPapers } from '../src/ui/adapter.js'
 
@@ -17,6 +17,16 @@ function pdf(text: string): Buffer {
 }
 
 describe('local PDF import', () => {
+  it('ignores a journal page header when extracting imported paper metadata', () => {
+    const metadata = parseLocalMetadataText(
+      '1042 IEEE ROBOTICS AND AUTOMATION LETTERS, VOL. 11, NO. 2, FEBRUARY 2026\nWhole-Body Impedance Coordinative Control for a Robot\nAlice Smith, Bob Jones\nAbstract\nrobot control',
+      'paper.pdf',
+    )
+    expect(metadata.title).toBe('Whole-Body Impedance Coordinative Control for a Robot')
+    expect(metadata.authors).toEqual(['Alice Smith', 'Bob Jones'])
+    expect(metadata.venue).toContain('IEEE ROBOTICS AND AUTOMATION LETTERS')
+  })
+
   it('validates, stores by SHA256, classifies, and stays unread', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-import-'))
     const rt = createRuntime(normalizeConfig({ dataDir: dir }))

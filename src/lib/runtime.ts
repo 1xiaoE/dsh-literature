@@ -10,7 +10,7 @@
 import type { LiteratureConfig } from '../config.js'
 import type { Db } from '../db.js'
 import { openDb } from '../db.js'
-import { dataDirs, ensureDataDir, expandHome } from './paths.js'
+import { dataDirs, ensureDataDir, expandHome, repairPdfPaths } from './paths.js'
 import { createRegistry, type SourceRegistry } from '../sources/registry.js'
 import { CarsiPdfProvider } from '../providers/carsi.js'
 import { PublisherBrowserProvider } from '../providers/publisher_browser.js'
@@ -44,6 +44,7 @@ export interface LiteratureRuntime {
 export function createRuntime(cfg: LiteratureConfig, opts: { fetchImpl?: typeof fetch } = {}): LiteratureRuntime {
   const dataDir = ensureDataDir(cfg)
   const db = openDb(dataDir)
+  repairPdfPaths(db, dataDir)
   const fetchImpl = opts.fetchImpl ?? fetch
   const registry = createRegistry({
     fetchImpl,

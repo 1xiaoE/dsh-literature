@@ -22,7 +22,7 @@ describe('sqlite migration', () => {
     migrate(db)
     migrate(db)
     const row = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(row.user_version).toBe(21)
+    expect(row.user_version).toBe(22)
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as Array<{ name: string }>

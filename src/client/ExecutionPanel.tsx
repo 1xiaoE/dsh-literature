@@ -146,6 +146,8 @@ function AuthCard({ status, api }: { status: UiPushStatus; api: LiteratureApi })
 
 export function ExecutionPanel({ status, api }: ExecutionPanelProps) {
   const warning = status.phase === 'auth_required'
+  const runner = status.runner ?? null
+  const runnerFailure = runner !== null && runner.status !== 'running' && runner.errorCode !== null
 
   // Elapsed wall time for a live push (SQLite timestamps are UTC).
   const elapsedMinutes = (iso: string | null): number | null => {
@@ -159,8 +161,10 @@ export function ExecutionPanel({ status, api }: ExecutionPanelProps) {
       <header className={CSS.detailHeader}>
         <div className={CSS.header}>
           <h3 className={CSS.panelTitle}>{t('panel.execution')}</h3>
-          <span className={`${CSS.statusBadge} ${phaseClass(status.phase)}`}>
-            {status.pushId === null ? phaseLabel(status.phase) : `${t('push.prefix')} #${status.pushId} · ${phaseLabel(status.phase)}`}
+          <span className={`${CSS.statusBadge} ${runnerFailure ? CSS.statusErr : phaseClass(status.phase)}`}>
+            {runnerFailure
+              ? `${t('status.failed')} · ${runner.errorCode}`
+              : status.pushId === null ? phaseLabel(status.phase) : `${t('push.prefix')} #${status.pushId} · ${phaseLabel(status.phase)}`}
           </span>
           {status.running && status.startedAt !== null && (
             <span className={CSS.detailMeta}>{`${t('push.elapsed')} ${elapsedMinutes(status.startedAt)}m`}</span>
@@ -170,6 +174,14 @@ export function ExecutionPanel({ status, api }: ExecutionPanelProps) {
         {status.staleRunning && (
           <p className={CSS.searchMessage} style={{ color: 'var(--dsh-lit-warn, #b58900)' }}>
             ⚠ {t('push.stale').replace('{m}', String(elapsedMinutes(status.lastActivityAt) ?? 0))}
+          </p>
+        )}
+        {runner !== null && runner.status === 'running' && !status.running && (
+          <p className={CSS.searchMessage} role="status">{runner.message ?? t('status.running')}</p>
+        )}
+        {runnerFailure && (
+          <p className={CSS.searchMessage} role="alert">
+            {runner.errorCode}: {runner.message ?? t('status.failed')}
           </p>
         )}
         {status.present ? <WorkflowProgress status={status} /> : <p className={CSS.empty}>{t('push.none')}</p>}

@@ -282,8 +282,12 @@ CREATE TABLE IF NOT EXISTS runner_jobs (
   finished_at  TEXT,
   exit_code    INTEGER,
   log_path     TEXT,
-  message      TEXT
+  message      TEXT,
+  error_code   TEXT,
+  retryable    INTEGER,
+  provider     TEXT,
+  model        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runner_jobs_status ON runner_jobs(status);
 
-PRAGMA user_version = 21;
+PRAGMA user_version = 22;

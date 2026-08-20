@@ -6,7 +6,8 @@ import { PaperDetailPanel } from '../src/client/PaperDetailPanel.js'
 import { PapersPanel } from '../src/client/PapersPanel.js'
 import { SearchKeywords } from '../src/client/SearchKeywords.js'
 import { setLanguage } from '../src/client/locales.js'
-import type { UiPaperDetail, UiPaperSummary, UiPushStatus } from '../src/client/wire.js'
+import { TOP_ROW_GRID_COLUMNS } from '../src/client/styles.js'
+import type { UiModelSelection, UiPaperDetail, UiPaperSummary, UiPushStatus } from '../src/client/wire.js'
 
 const summary: UiPaperSummary = {
   id: 'doi:10.1000/test',
@@ -124,6 +125,7 @@ describe('Paper Detail', () => {
     expect(html).toContain('Fulltext &amp; Report')
     expect(html).toContain('Open DOI')
     expect(html).toContain('Open PDF')
+    expect(html).toContain('Venue')
     expect(html).toContain('Read Report')
     expect(html).toContain('Favorite')
   })
@@ -133,7 +135,10 @@ describe('Paper Detail', () => {
       ...detail,
       researchFields: [],
       authors: [],
+      venue: null,
       doi: null,
+      url: null,
+      oaPdfUrl: null,
       abstract: null,
       agentRank: null,
       finalScore: null,
@@ -176,6 +181,13 @@ describe('Papers and Categories', () => {
     expect(html).toContain('Report')
   })
 
+  it('offers selection and deletion controls in the paper library', () => {
+    const html = renderToStaticMarkup(
+      <PapersPanel papers={[summary]} selectedId={summary.id} onSelect={() => {}} loading={false} api={api} libraryMode />,
+    )
+    expect(html).toContain('Select to delete')
+  })
+
   it('localizes fixed category groups and known category labels', () => {
     setLanguage('zh-CN', undefined)
     const html = renderToStaticMarkup(
@@ -199,6 +211,10 @@ describe('Papers and Categories', () => {
 })
 
 describe('Execution and Search', () => {
+  it('keeps the execution and search panels readable at desktop width', () => {
+    expect(TOP_ROW_GRID_COLUMNS).toBe('minmax(0, 1.28fr) minmax(380px, 1fr)')
+  })
+
   it('renders the five-stage progress and Reading 12/23', () => {
     const html = renderToStaticMarkup(<ExecutionPanel status={pushStatus('reading')} live api={api} />)
     for (const label of ['Retrieval', 'Ranking', 'Acquisition', 'Reading', 'Report']) {
@@ -225,5 +241,61 @@ describe('Execution and Search', () => {
     expect(html).toContain('Custom Search')
     expect(html).toContain('Use curriculum, stage and knowledge-gap based automatic query planning.')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Run<\/button>/)
+  })
+
+  it('shows an early runner failure in the execution status panel', () => {
+    const html = renderToStaticMarkup(
+      <ExecutionPanel
+        status={{
+          ...pushStatus('completed'),
+          runner: {
+            status: 'exited',
+            kind: 'push',
+            message: '模型认证失败。',
+            errorCode: 'AUTH',
+            retryable: false,
+            provider: 'example-provider',
+            model: 'example-model',
+            startedAt: '2026-08-20T10:00:00',
+            finishedAt: '2026-08-20T10:00:01',
+            logPath: '/tmp/runner.log',
+          },
+        }}
+        live
+        api={api}
+      />,
+    )
+    expect(html).toContain('AUTH')
+    expect(html).toContain('模型认证失败。')
+  })
+
+  it('shows the current Harness model as read-only workflow provenance', () => {
+    const selection: UiModelSelection = {
+      current: { provider: 'local-gateway', model: 'research-large' },
+      options: [{
+        provider: 'local-gateway',
+        providerName: 'Local Gateway',
+        models: [{ id: 'research-large', name: 'Research Large' }],
+      }],
+    }
+    const html = renderToStaticMarkup(<SearchKeywords api={api} active={false} modelSelection={selection} />)
+    expect(html).toContain('Local Gateway')
+    expect(html).toContain('Research Large')
+  })
+
+  it('renders Harness models as selectable provider groups', () => {
+    const selection: UiModelSelection = {
+      current: { provider: 'local-gateway', model: 'research-large' },
+      options: [{
+        provider: 'local-gateway',
+        providerName: 'Local Gateway',
+        models: [{ id: 'research-large', name: 'Research Large' }, { id: 'fast', name: 'Fast Model' }],
+      }],
+    }
+    const html = renderToStaticMarkup(<SearchKeywords api={api} active={false} modelSelection={selection} />)
+    expect(html).toContain('<select')
+    expect(html).toContain('<optgroup label="Local Gateway">')
+    expect(html).toContain('Research Large')
+    expect(html).toContain('Fast Model')
   })
 })

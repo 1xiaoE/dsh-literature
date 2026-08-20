@@ -18,7 +18,10 @@
  * (Research Fields / Topics counts), by the category resolver trigger, and
  * by the safe-retrieved-removal state machine.
  */
+import { existsSync, unlinkSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
 import type { Db } from '../db.js'
+import { expandHome } from './paths.js'
 
 export interface RemoveRetrievedResult {
   paperId: string
@@ -168,6 +171,38 @@ export function removeRetrievedBatch(db: Db, paperIds: string[]): RemoveRetrieve
       if (one.removedRetrieved) result.removedRetrievedCount += 1
       if (one.protectedLibrary) result.protectedLibraryCount += 1
       if (one.orphanDeleted) result.orphanPaperDeletedCount += 1
+    } catch {
+      result.failedCount += 1
+    }
+  }
+  return result
+}
+
+export interface DeleteLibraryResult {
+  deletedCount: number
+  notFoundCount: number
+  failedCount: number
+}
+
+/** Delete explicitly selected library papers and their managed local assets. */
+export function deleteLibraryPapers(db: Db, paperIds: string[], dataDir: string): DeleteLibraryResult {
+  const result: DeleteLibraryResult = { deletedCount: 0, notFoundCount: 0, failedCount: 0 }
+  const root = resolve(dataDir)
+  for (const paperId of paperIds) {
+    const exists = db.prepare('SELECT 1 FROM papers WHERE id = ?').get(paperId)
+    if (exists === undefined) { result.notFoundCount += 1; continue }
+    const assets = [
+      ...(db.prepare("SELECT pdf_path AS path FROM fetch_log WHERE paper_id = ? AND pdf_path IS NOT NULL AND pdf_path <> ''").all(paperId) as unknown as Array<{ path: string }>),
+      ...(db.prepare("SELECT report_path AS path FROM reports WHERE paper_id = ? AND report_path IS NOT NULL AND report_path <> ''").all(paperId) as unknown as Array<{ path: string }>),
+      ...(db.prepare("SELECT report_path AS path FROM pushes WHERE paper_id = ? AND report_path IS NOT NULL AND report_path <> ''").all(paperId) as unknown as Array<{ path: string }>),
+    ].map((asset) => expandHome(asset.path)).filter((path) => {
+      const rel = relative(root, resolve(path))
+      return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)
+    })
+    try {
+      db.prepare('DELETE FROM papers WHERE id = ?').run(paperId)
+      result.deletedCount += 1
+      for (const path of assets) if (existsSync(path)) { try { unlinkSync(path) } catch { /* best effort */ } }
     } catch {
       result.failedCount += 1
     }

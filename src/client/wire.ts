@@ -28,6 +28,7 @@ export interface UiPaperSummary {
   finalScore: number | null
   selected: boolean
   hasPdf: boolean
+  isOpenAccess?: boolean | null
   readCount: number
   fulltextChunks?: number | null
   readCoverage?: number | null
@@ -104,6 +105,21 @@ export interface UiDashboard {
   stages: UiStageSummary[]
 }
 
+/** Provider-neutral model discovery from the active Harness profile. */
+export interface UiModelSelection {
+  current: { provider: string; model: string } | null
+  options: Array<{
+    provider: string
+    providerName: string
+    models: Array<{ id: string; name: string; description?: string }>
+  }>
+}
+
+export interface UiModelSelectionInput {
+  provider: string
+  model: string
+}
+
 export interface UiRetrievalLine {
   source: string
   retrievedAt: string
@@ -168,11 +184,37 @@ export interface UiPushStatus {
     totalMs: number | null
     llmCallCount: number | null
   }
+  /** Latest runner lifecycle, including failures that happen before a push exists. */
+  runner?: UiRunnerStatus | null
+}
+
+export interface UiRunnerStatus {
+  status: 'running' | 'exited' | 'failed'
+  kind: 'push' | 'resume'
+  message: string | null
+  errorCode: string | null
+  retryable: boolean | null
+  provider: string | null
+  model: string | null
+  startedAt: string
+  finishedAt: string | null
+  logPath: string | null
 }
 
 export interface UiRunResult {
   ok: boolean
-  errorCode?: 'WORKFLOW_ALREADY_RUNNING' | 'RESUME_NOT_AVAILABLE'
+  errorCode?:
+    | 'NO_ADAPTER'
+    | 'AUTH'
+    | 'RATE_LIMIT'
+    | 'NETWORK'
+    | 'INVALID_MODEL'
+    | 'INVALID_ARGUMENT'
+    | 'WORKFLOW_ALREADY_RUNNING'
+    | 'RESUME_NOT_AVAILABLE'
+  retryable?: boolean
+  provider?: string | null
+  model?: string | null
   pushId?: number | null
   pid?: number | null
   /** Captured runner log (stderr/stdout) path; set when logging is enabled. */

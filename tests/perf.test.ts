@@ -209,7 +209,7 @@ describe('literature_record perf flush (agent-reported phases + total_ms)', () =
 describe('BATCH semantic ranking mandate', () => {
   it('push_now instructions require one-shot batch ranking (no per-paper LLM fan-out)', async () => {
     const { rt, dir } = setup()
-    const out = (await run(defineLiteraturePushNow(() => rt, () => null), {})) as { instructions: string[] }
+    const out = (await run(defineLiteraturePushNow(() => rt, () => null), { topic: 'legged_robot_control' })) as { instructions: string[] }
     const joined = out.instructions.join('\n')
     expect(joined).toMatch(/BATCH/)
     expect(joined).toMatch(/禁止逐篇发起独立 LLM 请求/)
@@ -224,7 +224,7 @@ describe('v10 schema', () => {
     const dir = mkdtempSync(join(tmpdir(), 'dsh-lit-v10-'))
     const db = openDb(dir)
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number }
-    expect(version.user_version).toBe(21)
+    expect(version.user_version).toBe(22)
     const cols = (db.prepare('PRAGMA table_info(pushes)').all() as Array<{ name: string }>).map((c) => c.name)
     for (const c of ['retrieval_ms', 'deterministic_ranking_ms', 'agent_ranking_ms', 'pdf_preflight_ms', 'pdf_download_ms', 'parsing_ms', 'fulltext_read_ms', 'report_generation_ms', 'total_ms', 'raw_candidates', 'deterministic_candidates', 'agent_scored_candidates', 'llm_call_count', 'llm_retry_count', 'pdf_attempt_count']) {
       expect(cols, c).toContain(c)

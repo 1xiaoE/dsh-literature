@@ -10,6 +10,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { normalizeConfig, type LiteratureConfig } from './config.js'
 import { createRuntime, type LiteratureRuntime } from './lib/runtime.js'
 import { makeUiRoutes, type WebRouteLike } from './ui/routes.js'
+import { createCurrentProfileWorkflowRunner } from './ui/adapter.js'
+import type { UiModelSelection, UiModelSelectionInput } from './ui/types.js'
 import { defineLiteratureSources } from './tools/literature_sources.js'
 import { defineLiteratureFetchPdf } from './tools/literature_fetch_pdf.js'
 import { defineLiteraturePdfPreflight } from './tools/literature_pdf_preflight.js'
@@ -51,6 +53,61 @@ function modelRouteReader(ctx: Context): () => string | null {
   }
 }
 
+/**
+ * Read provider/model discovery from the active Harness profile. This is a
+ * read-only presentation seam: the Harness model dialog remains the owner of
+ * selection and credentials, while Literature only mirrors the current value.
+ */
+function modelSelectionReader(ctx: Context): () => Promise<UiModelSelection> {
+  return async () => {
+    try {
+      const llm = ctx.get('llm') as {
+        listProviders?: () => Array<{ id?: string; name?: string }>
+        listModels?: (provider: string) => Promise<Array<{ id?: string; name?: string; description?: string }>>
+      } | undefined
+      const defaultModel = ctx.get('agentDefaultModel') as {
+        currentSelection?: () => { provider?: string; model?: string }
+      } | undefined
+      const rawSelection = defaultModel?.currentSelection?.()
+      const current = typeof rawSelection?.provider === 'string' && rawSelection.provider.trim() !== ''
+        && typeof rawSelection.model === 'string' && rawSelection.model.trim() !== ''
+        ? { provider: rawSelection.provider, model: rawSelection.model }
+        : null
+      const providers = llm?.listProviders?.() ?? []
+      const options = await Promise.all(providers.flatMap((provider) => {
+        if (typeof provider.id !== 'string' || provider.id.trim() === '') return []
+        const id = provider.id
+        return [Promise.resolve(llm?.listModels?.(id) ?? []).then((models) => ({
+          provider: id,
+          providerName: typeof provider.name === 'string' && provider.name.trim() !== '' ? provider.name : id,
+          models: models.flatMap((model) => {
+            if (typeof model.id !== 'string' || model.id.trim() === '') return []
+            return [{
+              id: model.id,
+              name: typeof model.name === 'string' && model.name.trim() !== '' ? model.name : model.id,
+              ...(typeof model.description === 'string' && model.description.trim() !== '' ? { description: model.description } : {}),
+            }]
+          }),
+        }))]
+      }))
+      return { current, options }
+    } catch {
+      return { current: null, options: [] }
+    }
+  }
+}
+
+function modelSelectionWriter(ctx: Context): (input: UiModelSelectionInput) => Promise<UiModelSelection> {
+  return async (input) => {
+    const svc = ctx.get('agentDefaultModel') as
+      | { saveSelection?: (selection: { provider: string; model: string }) => Promise<void> }
+      | undefined
+    if (svc?.saveSelection === undefined) throw new Error('model selection persistence is unavailable in this Harness profile')
+    await svc.saveSelection({ provider: input.provider, model: input.model })
+    return modelSelectionReader(ctx)()
+  }
+}
+
 export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
   const cfg = normalizeConfig(config)
   let runtime: LiteratureRuntime | undefined
@@ -82,6 +139,36 @@ export function apply(ctx: Context, config?: Partial<LiteratureConfig>): void {
     | { register: (route: WebRouteLike) => () => void }
     | undefined
   if (webServer !== undefined) {
-    ctx.effect(() => webServer.register(makeUiRoutes({ getRt })), 'dsh-literature: ui routes')
+    const workflowRunner = createCurrentProfileWorkflowRunner({
+      agentDefaultModel: ctx.get('agentDefaultModel') as {
+        currentSelection?: () => { provider: string; model: string }
+      } | undefined,
+      agents: ctx.get('agents') as {
+        create: (options: {
+          sessionId: string
+          meta: { cwd: string }
+          agentOptions: { provider: string; model: string }
+        }) => Promise<{
+          agent: {
+            followup: (message: {
+              id: string
+              role: 'user'
+              content: Array<{ type: 'text'; text: string }>
+              source: { kind: 'user' }
+            }) => void
+            whenIdle: () => Promise<void>
+            session: { events: readonly unknown[] }
+          }
+          dispose: () => Promise<void>
+        }>
+      } | undefined,
+    })
+    ctx.effect(() => webServer.register(makeUiRoutes({
+      getRt,
+      startPush: workflowRunner.startPush,
+      startResume: workflowRunner.startResume,
+      modelSelection: modelSelectionReader(ctx),
+      saveModelSelection: modelSelectionWriter(ctx),
+    })), 'dsh-literature: ui routes')
   }
 }

@@ -14,10 +14,12 @@ interface PapersPanelProps {
   onImported?: (paperId: string) => void
   /** true when the active category is the Retrieved pool (deletion available). */
   retrievedMode?: boolean
+  /** true when selected library papers may be deleted. */
+  libraryMode?: boolean
   onChanged?: () => void
 }
 
-export function PapersPanel({ papers, selectedId, onSelect, loading, api, onImported, retrievedMode = false, onChanged }: PapersPanelProps) {
+export function PapersPanel({ papers, selectedId, onSelect, loading, api, onImported, retrievedMode = false, libraryMode = false, onChanged }: PapersPanelProps) {
   const input = useRef<HTMLInputElement>(null)
   const [importing, setImporting] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
@@ -48,6 +50,13 @@ export function PapersPanel({ papers, selectedId, onSelect, loading, api, onImpo
     if (api === undefined || checked.size === 0) return
     setRemoving(true); setMessage(null)
     try {
+      if (libraryMode) {
+        const result = await api.deleteLibraryPapers([...checked])
+        setMessage(t('library.deleted').replace('{n}', String(result.deletedCount)))
+        setSelecting(false); setChecked(new Set()); setConfirming(false)
+        onChanged?.()
+        return
+      }
       const result = await api.bulkRemoveRetrieved([...checked])
       const parts: string[] = []
       if (result.removedRetrievedCount > 0) parts.push(t('retrieved.removed').replace('{n}', String(result.removedRetrievedCount)))
@@ -65,9 +74,9 @@ export function PapersPanel({ papers, selectedId, onSelect, loading, api, onImpo
       <h3 className={CSS.panelTitle}>
         {t('panel.papers')}
         <span className={CSS.categoryCount}>{papers.length} {t('papers.results')}</span>
-        {retrievedMode && api !== undefined && papers.length > 0 && (
+        {(retrievedMode || libraryMode) && api !== undefined && papers.length > 0 && (
           !selecting
-            ? <button type="button" className={`${CSS.button} ${CSS.buttonGhost}`} onClick={() => { setSelecting(true); setChecked(new Set()) }}>{t('retrieved.select')}</button>
+            ? <button type="button" className={`${CSS.button} ${CSS.buttonGhost}`} onClick={() => { setSelecting(true); setChecked(new Set()) }}>{libraryMode ? t('library.select') : t('retrieved.select')}</button>
             : (
               <>
                 <span className={CSS.categoryCount}>{t('retrieved.selectedCount').replace('{n}', String(checked.size))}</span>
@@ -78,7 +87,7 @@ export function PapersPanel({ papers, selectedId, onSelect, loading, api, onImpo
                   disabled={checked.size === 0 || removing}
                   onClick={() => { setConfirming(true) }}
                 >
-                  {t('retrieved.removeBulk')}
+                  {libraryMode ? t('library.delete') : t('retrieved.removeBulk')}
                 </button>
               </>
             )
@@ -94,9 +103,9 @@ export function PapersPanel({ papers, selectedId, onSelect, loading, api, onImpo
       )}
       {confirming && (
         <p className={CSS.searchMessage}>
-          <span>{t('retrieved.confirmBulk').replace('{n}', String(checked.size))}</span>
+          <span>{libraryMode ? t('library.confirmDelete').replace('{n}', String(checked.size)) : t('retrieved.confirmBulk').replace('{n}', String(checked.size))}</span>
           <button type="button" className={`${CSS.button} ${CSS.buttonGhost}`} onClick={() => { setConfirming(false) }}>{t('retrieved.cancel')}</button>
-          <button type="button" className={`${CSS.button} ${CSS.buttonPrimary}`} disabled={removing} onClick={() => { void removeSelected() }}>{t('retrieved.removeBulk')}</button>
+          <button type="button" className={`${CSS.button} ${CSS.buttonPrimary}`} disabled={removing} onClick={() => { void removeSelected() }}>{libraryMode ? t('library.delete') : t('retrieved.removeBulk')}</button>
         </p>
       )}
       {loading && <p className={CSS.empty}>…</p>}

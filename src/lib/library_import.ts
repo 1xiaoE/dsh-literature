@@ -71,9 +71,53 @@ function titleFromFilename(name: string): string {
   return clean(safeFilename(name).replace(/\.pdf$/iu, '').replace(/[_-]+/g, ' '))
 }
 
+function isLikelyAuthorName(line: string): boolean {
+  const words = clean(line).split(/\s+/u)
+  return words.length >= 2 && words.length <= 5 && words.every((word) => /^[A-Z][A-Za-z.'-]*$/u.test(word))
+}
+
 function parseAuthors(line: string): string[] {
   if (/^(abstract|keywords?|introduction|doi\b)/iu.test(line)) return []
-  return line.split(/(?:,|\band\b|;)/iu).map(clean).filter((part) => part.length >= 2 && part.length < 100).slice(0, 12)
+  const parts = line.split(/(?:,|\band\b|;)/iu).map(clean)
+    .filter((part) => part.length >= 2 && part.length < 100)
+    .filter((part) => !/^(?:student|senior|associate|life)?\s*member(?:\s+of)?\s*(?:ieee)?$|^ieee$/iu.test(part))
+    .slice(0, 12)
+  return parts.length > 1 || isLikelyAuthorName(line) ? parts : []
+}
+
+function isPublicationHeader(line: string): boolean {
+  return /^\d+\s+(?:ieee|acm|springer|elsevier|sage|wiley|mdpi)\b.*\b(?:vol\.?|volume|no\.?|issue|february|january|march|april|may|june|july|august|september|october|november|december)\b/iu.test(line)
+}
+
+/** Parse conservative front-matter metadata from extracted PDF text. */
+export function parseLocalMetadataText(text: string, filename: string, raw = text): LocalMetadata {
+  const searchable = `${text}\n${raw}`
+  const lines = text.split(/\r?\n/).map(clean).filter(Boolean)
+  const abstractIndex = lines.findIndex((line) => /^abstract\b/iu.test(line))
+  const titleCandidate = lines.slice(0, Math.max(0, abstractIndex === -1 ? 8 : abstractIndex))
+    .find((line) => line.length >= 6 && line.length <= 300 && !isPublicationHeader(line) && !/^(doi|keywords?|copyright|page\s+\d+)/iu.test(line))
+  const titleIndex = lines.indexOf(titleCandidate ?? '')
+  let title = titleCandidate ?? titleFromFilename(filename)
+  let titleEndIndex = titleIndex
+  if (titleIndex >= 0) {
+    const titleParts = [title]
+    for (let index = titleIndex + 1; index < lines.length && index < titleIndex + 4; index += 1) {
+      const line = lines[index]!
+      if (/^(abstract|keywords?|introduction|doi\b)/iu.test(line) || parseAuthors(line).length > 0) break
+      titleParts.push(line)
+      titleEndIndex = index
+    }
+    title = clean(titleParts.join(' '))
+  }
+  const authorLine = titleEndIndex >= 0 ? lines.slice(titleEndIndex + 1, titleEndIndex + 4).find((line) => parseAuthors(line).length > 0) : undefined
+  const doi = searchable.match(DOI_RE)?.[0]?.replace(/[).,;]+$/u, '').toLowerCase() ?? null
+  const keywordLine = lines.find((line) => /^keywords?\s*[:—-]/iu.test(line))
+  const keywords = keywordLine ? keywordLine.replace(/^keywords?\s*[:—-]\s*/iu, '').split(/[,;·]/).map(clean).filter(Boolean).slice(0, 20) : []
+  const abstractLine = abstractIndex >= 0 ? lines.slice(abstractIndex, abstractIndex + 12).join(' ') : null
+  const year = Number(searchable.match(/\b(19|20)\d{2}\b/u)?.[0] ?? '') || null
+  const affiliation = lines.find((line) => /\b(university|institute|laboratory|department|college)\b/iu.test(line)) ?? null
+  const venue = lines.slice(0, 8).find(isPublicationHeader)?.replace(/^\d+\s+/u, '').replace(/,\s*vol\.?\s+.*$/iu, '').trim() ?? null
+  return { title, authors: authorLine ? parseAuthors(authorLine) : [], affiliation, abstract: abstractLine, keywords, doi, venue, year, source: 'pdf' }
 }
 
 /** Extract conservative front-matter metadata from the already validated PDF. */
@@ -83,21 +127,7 @@ export async function extractLocalMetadata(pdfPath: string, filename: string): P
   // Many PDFs expose document identifiers in an uncompressed metadata stream
   // even when text extraction is unavailable; this remains local extraction.
   const raw = readFileSync(pdfPath).toString('latin1')
-  const searchable = `${text}\n${raw}`
-  const lines = text.split(/\r?\n/).map(clean).filter(Boolean)
-  const abstractIndex = lines.findIndex((line) => /^abstract\b/iu.test(line))
-  const titleCandidate = lines.slice(0, Math.max(0, abstractIndex === -1 ? 8 : abstractIndex))
-    .find((line) => line.length >= 6 && line.length <= 300 && !/^(doi|keywords?|copyright|page\s+\d+)/iu.test(line))
-  const title = titleCandidate ?? titleFromFilename(filename)
-  const titleIndex = lines.indexOf(titleCandidate ?? '')
-  const authorLine = titleIndex >= 0 ? lines.slice(titleIndex + 1, titleIndex + 4).find((line) => parseAuthors(line).length > 0) : undefined
-  const doi = searchable.match(DOI_RE)?.[0]?.replace(/[).,;]+$/u, '').toLowerCase() ?? null
-  const keywordLine = lines.find((line) => /^keywords?\s*[:—-]/iu.test(line))
-  const keywords = keywordLine ? keywordLine.replace(/^keywords?\s*[:—-]\s*/iu, '').split(/[,;·]/).map(clean).filter(Boolean).slice(0, 20) : []
-  const abstractLine = abstractIndex >= 0 ? lines.slice(abstractIndex, abstractIndex + 12).join(' ') : null
-  const year = Number(searchable.match(/\b(19|20)\d{2}\b/u)?.[0] ?? '') || null
-  const affiliation = lines.find((line) => /\b(university|institute|laboratory|department|college)\b/iu.test(line)) ?? null
-  return { title, authors: authorLine ? parseAuthors(authorLine) : [], affiliation, abstract: abstractLine, keywords, doi, venue: null, year, source: 'pdf' }
+  return parseLocalMetadataText(text, filename, raw)
 }
 
 function asPaper(metadata: LocalMetadata, sha256: string): PaperRef {

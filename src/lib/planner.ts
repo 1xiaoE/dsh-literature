@@ -93,7 +93,7 @@ export function planQueries(
   return out
 }
 
-/** Resolve a topic by id or display name; falls back to the default. */
+/** Resolve a configured topic or normalize an arbitrary user-supplied topic. */
 export function resolveTopic(
   topics: TopicDef[],
   input: string | undefined,
@@ -101,6 +101,7 @@ export function resolveTopic(
   if (input) {
     const hit = topics.find((t) => t.id === input || t.displayName === input)
     if (hit) return hit
+    return { id: input, displayName: input, canonicalQueries: [input], secondaryQueries: [], negativeTerms: [] }
   }
   return topics[0]!
 }

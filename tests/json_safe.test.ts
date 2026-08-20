@@ -155,7 +155,7 @@ describe('A: all literature_* tool outputs pass the lossless-JSON boundary', () 
 
   it('literature_push_now', async () => {
     const { rt, dir } = setup()
-    expectLossless(await run(defineLiteraturePushNow(() => rt, () => null), {}))
+    expectLossless(await run(defineLiteraturePushNow(() => rt, () => null), { topic: 'legged_robot_control' }))
     rt.db.close()
     rmSync(dir, { recursive: true, force: true })
   })

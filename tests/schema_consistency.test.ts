@@ -52,7 +52,7 @@ describe('schema consistency', () => {
         const schemaSql = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8')
         dbSql.exec(schemaSql)
 
-        expect((dbSql.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(21)
+        expect((dbSql.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(22)
 
         const migrated = snapshot(dbMigrated)
         const fromSql = snapshot(dbSql)

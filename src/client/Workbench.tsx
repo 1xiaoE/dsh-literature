@@ -9,7 +9,7 @@ import { PapersPanel } from './PapersPanel.tsx'
 import { SearchKeywords } from './SearchKeywords.tsx'
 import { CSS } from './styles.ts'
 import { defaultPaperId, isPushActive } from './view-model.ts'
-import type { UiCategory, UiDashboard, UiDataMode, UiPaperDetail, UiPaperSummary, UiPushStatus } from './wire.ts'
+import type { UiCategory, UiDashboard, UiDataMode, UiModelSelection, UiPaperDetail, UiPaperSummary, UiPushStatus } from './wire.ts'
 
 const POLL_MS = 4000
 
@@ -27,6 +27,7 @@ export function Workbench({ controller: _controller }: WorkbenchProps) {
   const api = apiRef.current
   const [dashboard, setDashboard] = useState<UiDashboard | null>(null)
   const [status, setStatus] = useState<UiPushStatus | null>(null)
+  const [modelSelection, setModelSelection] = useState<UiModelSelection | null>(null)
   const [coreMode, setCoreMode] = useState<UiDataMode | null>(null)
   const [paperMode, setPaperMode] = useState<UiDataMode | null>(null)
   const [detailMode, setDetailMode] = useState<UiDataMode | null>(null)
@@ -44,10 +45,15 @@ export function Workbench({ controller: _controller }: WorkbenchProps) {
   useEffect(() => {
     let cancelled = false
     const refresh = async (): Promise<void> => {
-      const [dashboardResult, statusResult] = await Promise.all([api.dashboard(), api.pushStatus()])
+      const [dashboardResult, statusResult, modelResult] = await Promise.all([
+        api.dashboard(),
+        api.pushStatus(),
+        api.modelSelection().catch(() => null),
+      ])
       if (cancelled) return
       setDashboard(dashboardResult.data)
       setStatus(statusResult.data)
+      setModelSelection(modelResult)
       setCoreMode(combineModes([dashboardResult.mode, statusResult.mode]))
     }
     void refresh()
@@ -140,11 +146,18 @@ export function Workbench({ controller: _controller }: WorkbenchProps) {
           {status === null
             ? <section className={`${CSS.panel} ${CSS.execution}`}><h3 className={CSS.panelTitle}>{t('panel.execution')}</h3><p className={CSS.empty}>{backendUnavailable ? t('backend.unavailable') : '…'}</p></section>
             : <ExecutionPanel status={status} live={dataMode === 'live'} api={api} />}
-          <SearchKeywords api={api} active={isPushActive(status)} unavailable={backendUnavailable} />
+          <SearchKeywords
+            api={api}
+            active={isPushActive(status)}
+            unavailable={backendUnavailable}
+            modelSelection={modelSelection}
+            onRunResult={() => { setRetryKey((value) => value + 1) }}
+            onModelSelectionSaved={setModelSelection}
+          />
         </div>
         <div className={CSS.bottomRow}>
           <CategoriesPanel api={api} categories={categories} active={activeCategory} onSelect={setActiveCategory} onChanged={categoriesChanged} />
-          <PapersPanel papers={papers} selectedId={selectedId} onSelect={setSelectedId} loading={papersLoading} api={api} onImported={(paperId) => { setActiveCategory('all'); setSelectedId(paperId); setRetryKey((value) => value + 1) }} retrievedMode={activeCategory === 'all' || activeCategory === ''} onChanged={() => { setRetryKey((value) => value + 1) }} />
+          <PapersPanel papers={papers} selectedId={selectedId} onSelect={setSelectedId} loading={papersLoading} api={api} onImported={(paperId) => { setActiveCategory('all'); setSelectedId(paperId); setRetryKey((value) => value + 1) }} retrievedMode={activeCategory === 'all' || activeCategory === ''} libraryMode={activeCategory === 'library'} onChanged={() => { setRetryKey((value) => value + 1) }} />
           <PaperDetailPanel key={detail?.id ?? 'none'} detail={detail} loading={detailLoading} api={api} fields={categories.filter((category) => category.kind === 'field')} onChanged={categoriesChanged} />
         </div>
       </div>

@@ -159,6 +159,7 @@ export function PaperDetailPanel({ detail, loading, api, fields, onChanged }: Pa
       </Section>
 
       <Section title={t('detail.metadata')} show={metadata}>
+        <Field label={t('detail.venue')} value={detail.venue?.trim() || null} />
         <Field label={t('detail.authors')} value={authors} />
         <Field label={t('detail.affiliation')} value={detail.affiliation?.trim() || null} />
         <Field label={t('detail.keywords')} value={detail.keywords?.filter(Boolean).join(', ') || null} />

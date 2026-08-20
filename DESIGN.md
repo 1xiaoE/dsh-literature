@@ -1,12 +1,12 @@
 # Literature Agent V0.1 — 设计定稿
 
 > 状态：已确认（含 8 项调整），编码中。
-> 仓库：`~/dsh-literature`（代码）｜ 数据：`~/.local/share/dsh-literature/`（XDG，非 git）
+> 仓库：`~/dsh-literature`（代码）｜ 数据：`~/dsh-literature/Data/`（独立运行数据目录，非 git）
 
 ## 0. 架构总原则
 
 1. **模型无关由构造保证**：本插件业务代码**不调用任何 LLM、不写死任何模型 id**。智能环节（排序、选题、全文理解、报告撰写）全部交给 agent 自身完成——Harness 的 agent 由 `ctx.llm` 路由（DeepSeek 或 OpenAI 皆可），插件只提供确定性基础设施（源适配、去重、PDF、全文分块、SQLite、归档）。
-2. **数据与代码分离**：代码在 `~/dsh-literature`（git），运行数据在 XDG data 路径。
+2. **数据与代码分离**：代码在 `~/dsh-literature`（git），运行数据固定放在仓库忽略的独立目录 `~/dsh-literature/Data/`。
 3. **可安装/可卸载插件**：通过 profile `package.json` 依赖 + `dsh.profile.bundles` 行挂载；移除即卸载。不修改 Harness core。
 4. **headless 优先，不嵌套 jobs**：周期触发由 OS cron/systemd timer 直接调用 Harness 官方 headless profile，headless agent 完成一次完整 workflow 后退出。`ctx.jobs` 留给未来 GUI 内后台长任务。
 
@@ -41,7 +41,7 @@
 │   │   ├── pdf.ts                          # 多源 fallback（公开链 → providers → 终态）+ sha256 + 溯源
 │   │   └── fulltext.ts                     # pdftotext → 分块纯文本 → SQLite
 │   ├── lib/
-│   │   ├── paths.ts                        # XDG data 路径解析
+│   │   ├── paths.ts                        # 独立 Data 路径解析
 │   │   ├── history.ts                      # 去重/已读查询
 │   │   ├── stages.ts                       # 阶段进度（target_papers 门控）
 │   │   ├── ranking.ts                      # 确定性 pre-ranking（权重配置化）
@@ -55,14 +55,14 @@
 │   │   ├── literature_record.ts            # tool：推送完成写入历史 + 阶段推进
 │   │   └── literature_push_now.ts          # tool：主入口（返回工作流指令，无 LLM）
 │   └── lib/
-│       ├── paths.ts                        # XDG data 路径解析
+│       ├── paths.ts                        # 独立 Data 路径解析
 │       ├── history.ts                      # 去重/已读查询
 │       ├── stages.ts                       # 阶段进度（target_papers 门控）
 │       ├── ranking.ts                      # 确定性 pre-ranking（权重配置化）
 │       └── report.ts                       # 报告归档到文献库子目录
 └── tests/
 
-~/.local/share/dsh-literature/             # 运行数据（非 git）
+~/dsh-literature/Data/             # 运行数据（非 git）
 ├── literature.db                          # SQLite (WAL)
 ├── pdfs/<sha256>.pdf                      # 按内容哈希
 ├── cache/<adapter>/<query>.json           # 检索缓存
@@ -150,7 +150,7 @@ interface SourceAdapter {
 
 - **定位**：公开/OA 链（arxiv → openalex OA → unpaywall → crossref publisher）全部失败后、仅对**已过 ranking 质量门**的论文，经 `literature_fetch_pdf(allowCarsi=true)` 最后尝试 CARSI（`ds.carsi.edu.cn`）。CARSI **不是 OA 源**：provenance `source=carsi / access_type=institutional / is_open_access=false`，PDF 仅进私人文献库。
 - **架构**：独立 `PdfProvider` 层（`src/providers/types.ts` + `src/providers/carsi.ts`），`fetch/pdf.ts` 只做通用编排（公开候选 → providers 链 → 终态）；CARSI 特例（浏览器驱动、登录墙检测、会话账本、低频门）全部在 provider 内，不散落。
-- **浏览器会话**：独立持久 profile `~/.local/share/dsh-literature/browser-profile/`（`launchPersistentContext`），**不读取/复制日常浏览器 Cookie 库**；首次认证用 `bin/dsh-literature-carsi-login.mjs` headed 人工登录，后续 headless 复用；失效返回 `AUTH_REQUIRED`（≠ FULLTEXT_UNAVAILABLE）。
+- **浏览器会话**：独立持久 profile `~/dsh-literature/Data/browser-profile/`（`launchPersistentContext`），**不读取/复制日常浏览器 Cookie 库**；首次认证用 `bin/dsh-literature-carsi-login.mjs` headed 人工登录，后续 headless 复用；失效返回 `AUTH_REQUIRED`（≠ FULLTEXT_UNAVAILABLE）。
 - **状态机（DB v7）**：fetch_log outcome 扩展 `PDF_OK / AUTH_REQUIRED / ACCESS_DENIED / PDF_NOT_FOUND`（表重建扩 CHECK）+ `access_type / is_open_access` 溯源列；pushes status 增加 `auth_required`（表重建）。**cooldown 仅 FULLTEXT_UNAVAILABLE**；AUTH_REQUIRED 永不 cooldown，提示重新登录。
 - **下载验证（req 5）**：HTTP 成功 → Content-Type（可得时）→ `%PDF-` magic → 非 HTML 登录页 → ≥ minPdfBytes → sha256 落盘 `pdfs/<sha256>.pdf`。
 - **严格低频**：`carsi.{enabled,maxPerPush:1,minIntervalMinutes:120}` + provider 会话账本（`carsi/session.json`）；preflight 不探测 CARSI；每会话一篇论文；不批量抓取。
@@ -248,7 +248,7 @@ interface SourceAdapter {
 
 ## 9. 报告存储（约束 5）
 
-- canonical：`~/.local/share/dsh-literature/reports/<阶段>/<作者_年份_关键词>.md`（`libraryRoot` 为空时默认）。
+- canonical：`~/dsh-literature/Data/reports/<阶段>/<作者_年份_关键词>.md`（`libraryRoot` 为空时默认）。
 - 不为写 `~/Desktop/文献阅读` 放宽 Harness sandbox；Desktop 导出由外层脚本或 Zotero 同步完成。
 
 ## 10. V0.1 Acceptance Criteria
@@ -260,7 +260,7 @@ interface SourceAdapter {
 4. FULLTEXT_UNAVAILABLE 分支：流程停止、状态记录、无虚假精读（有测试）。
 5. PDF 多源 fallback：404/403/空正文回退；全失败记录 attempts（有测试）。
 6. 去重生效：已推论文 `is_seen=1` 排除或明确标记。
-7. SQLite 迁移幂等（v2）；运行数据全在 `~/.local/share/dsh-literature/`，`git status` 干净。
+7. SQLite 迁移幂等（v2）；运行数据全在 `~/dsh-literature/Data/`，`git status` 干净。
 8. headless CLI 无 GUI 可用（OS cron 可调）。
 
 **非目标（V0.1）**：GUI cron、Semantic Scholar、Zotero、PDF 视觉理解。

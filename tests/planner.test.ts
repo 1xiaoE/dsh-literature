@@ -27,6 +27,13 @@ import type { PaperRef, SearchHit, SearchParams, SourceAdapter } from '../src/so
 const CJK = /[\u4e00-\u9fff]/
 
 describe('topic normalization (Chinese input → English queries)', () => {
+  it('normalizes an arbitrary user topic instead of falling back to a preset', () => {
+    const topic = resolveTopic(defaultConfig().topics, '契约分层')
+    expect(topic.id).toBe('契约分层')
+    expect(topic.displayName).toBe('契约分层')
+    expect(topic.canonicalQueries).toEqual(['契约分层'])
+  })
+
   it('generates only English queries for the default Chinese topic', () => {
     const cfg = defaultConfig()
     const topic = resolveTopic(cfg.topics, '足式机器人控制')

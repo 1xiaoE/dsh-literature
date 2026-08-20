@@ -4,7 +4,7 @@
 
 基于 DeepSeek Harness 的 AI 辅助文献阅读与推荐工作流：分阶段课程化学习、多源检索、全文验证阅读、知识缺口感知排序与结构化研究笔记。
 
-本仓库是**纯插件 / 工作流源码仓库**：不含个人阅读库、运行数据或凭据。所有运行时数据仅存本机 `~/.local/share/dsh-literature/`（见 [运行时数据](#运行时数据)）。
+本仓库是**纯插件 / 工作流源码仓库**：不含个人阅读库、运行数据或凭据。所有运行时数据仅存本机 `~/dsh-literature/Data/`（见 [运行时数据](#运行时数据)）。
 
 ## 特性
 
@@ -29,7 +29,7 @@ topic → 检索（Recent + Landmark）→ 去重 → 预排序（Top 15）
 ```
 
 - **模型无关**：插件自身不调用 LLM；智能环节由 harness 路由的 agent 执行。
-- **数据/代码分离**：代码在此仓库，运行数据在 XDG 目录。
+- **数据/代码分离**：源码与构建产物留在仓库，运行数据仅存于 `~/dsh-literature/Data/`。
 - **插件边界**：作为 DeepSeek Harness 插件安装，从不修改 harness core。
 
 ## 环境要求
@@ -76,13 +76,20 @@ export OPENALEX_API_KEY='YOUR_KEY'
 ## 使用
 
 ```sh
-node bin/dsh-literature-push.mjs --topic "足式机器人控制"   # 一次完整推送
+node bin/dsh-literature-push.mjs --profile <profile> --topic "<你的主题>"  # 首次推送：选择自己的主题
+node bin/dsh-literature-push.mjs --profile <profile>                         # 后续推送：复用已保存的学习主题/阶段
 node bin/dsh-literature-push.mjs --resume <pushId>          # 恢复（可确定性时 0-LLM）
 node bin/dsh-literature-actions.mjs list | resolve <id>     # Human-in-the-loop 待办
 node bin/dsh-literature-browser-login.mjs --push <pushId>   # 出版社登录墙（HITL）
 node bin/dsh-literature-browser-login.mjs --url <article>   # 为指定文章页登录
 node bin/dsh-literature-browser-login.mjs --check           # 浏览器会话状态
 ```
+
+首次新推送必须输入主题。插件会把主题随 push 持久化，后续省略主题时沿用当前学习阶段；显式传入 `--topic` 可切换学习主线。模型 adapter、provider、model 与凭据均由所选 Harness `--profile` 决定。
+
+Web UI 运行时，文献工作流会在同一个正在运行的 Harness profile 内创建临时 Agent，直接使用 Harness 模型对话框当前选择的 provider/model，以及该 profile 的 adapter 和凭据。插件不会提供 provider、model 或凭据，也不会在错误后偷偷切换 provider。命令行 runner 仍是独立自动化入口：未配置专用 profile 时使用 `headless`；需要专用 profile 时，在启动宿主进程的环境中设置 `DSH_LITERATURE_PROFILE=<工作流profile>`，并在 Harness 中自行安装和配置它。
+
+文献工作台中的模型选择器会把选中的 provider/model 写入当前 Harness profile 的默认模型设置；下一次 Web 工作流会使用这一精确选择，不会改变正在运行的工作流。provider 安装和凭据仍由 Harness 管理；选择当前 profile 不可用的模型时返回 `INVALID_MODEL`，不会自动切换到其他 provider。
 
 > **手动 PDF 剪切入库**：登录墙/限流时，用户在浏览器里手动下载论文 PDF 到 `~/Downloads`，再把路径告诉 agent；agent 调用 `literature_fetch_pdf(pushId, paperId, manualPdfPath=<路径>)` 校验后**剪切**进知识库（源文件不再残留）。详见 [Human-in-the-loop](#human-in-the-loop)。
 
@@ -186,7 +193,7 @@ node bin/dsh-literature-push.mjs --resume <pushId>
 ## 运行时数据
 
 ```
-~/.local/share/dsh-literature/
+~/dsh-literature/Data/
 ├── literature.db      # SQLite 溯源（papers / pushes / categories / reports / …）
 ├── pdfs/<sha256>.pdf  # 内容哈希存储
 ├── cache/             # 适配器缓存

@@ -168,11 +168,11 @@ const MOCK_DETAIL: UiPaperDetail = {
   fulltextStatus: 'ok',
   fulltextChunks: 14,
   readCoverage: 0.86,
-  pdfPath: '~/.local/share/dsh-literature/pdfs/sha256abc.pdf',
+  pdfPath: '~/dsh-literature/Data/pdfs/sha256abc.pdf',
   pdfSource: 'https://arxiv.org/pdf/2301.04142',
   accessType: 'oa',
   isOpenAccess: true,
-  reportPath: '~/.local/share/dsh-literature/reports/基础控制/jenelten2023_learning_robust.md',
+  reportPath: '~/dsh-literature/Data/reports/基础控制/jenelten2023_learning_robust.md',
 }
 
 export const MOCK_DASHBOARD: UiDashboard = {
@@ -182,6 +182,7 @@ export const MOCK_DASHBOARD: UiDashboard = {
   reportCount: 3,
   categories: [
     { id: 'all', label: 'Retrieved', kind: 'workflow', count: MOCK_PAPERS.length },
+    { id: 'library', label: 'Library', kind: 'workflow', count: 8 },
     { id: 'selected', label: 'Selected', kind: 'workflow', count: 3 },
     { id: 'to-read', label: 'To Read', kind: 'workflow', count: 2 },
     { id: 'read', label: 'Read', kind: 'workflow', count: 4 },

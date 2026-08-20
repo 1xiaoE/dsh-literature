@@ -118,12 +118,12 @@ export interface LiteratureConfig {
   topics: TopicDef[]
   /**
    * Report archive root. Empty string resolves to the canonical data-dir
-   * reports path (~/.local/share/dsh-literature/reports). Desktop/library
+   * reports path (~/dsh-literature/Data/reports). Desktop/library
    * exports are handled by an outer script or Zotero sync, never by the
    * plugin relaxing the harness sandbox.
    */
   libraryRoot: string
-  /** XDG data dir for db/pdfs/cache/reports; empty string resolves to the default */
+  /** Isolated data dir for db/pdfs/cache/reports; empty string resolves to ~/dsh-literature/Data */
   dataDir: string
   /** preferred publication years (recency); empty computes from retrieval.recentYears */
   yearsPrefer: number[]
@@ -205,7 +205,7 @@ export interface LiteratureConfig {
    * completes a legal login in a headed browser (bin/dsh-literature-browser-login).
    *
    * Uses the SAME persistent profile as the (legacy) CARSI provider:
-   * ~/.local/share/dsh-literature/browser-profile/ — never the user's daily
+   * ~/dsh-literature/Data/browser-profile/ — never the user's daily
    * browser cookies. Sessions are reused across pushes until they expire.
    */
   publisherBrowser: {

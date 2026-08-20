@@ -299,7 +299,10 @@ export function defineLiteratureSources(getRt: () => LiteratureRuntime) {
     async execute(args: SourcesInput): Promise<SourcesOutput> {
       const rt = getRt()
       const { db, cfg } = rt
-      const topic: TopicDef = resolveTopic(cfg.topics, args.topic)
+      const persistedTopic = args.pushId === undefined
+        ? undefined
+        : (db.prepare('SELECT topic FROM pushes WHERE id = ?').get(args.pushId) as { topic?: string } | undefined)?.topic
+      const topic: TopicDef = resolveTopic(cfg.topics, args.topic ?? persistedTopic)
       const years = args.years && args.years.length > 0 ? args.years : cfg.yearsPrefer
 
       let pushId = args.pushId

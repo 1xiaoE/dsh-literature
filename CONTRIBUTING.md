@@ -59,4 +59,4 @@ dsh plugin --profile web add link:/path/to/dsh-literature
 ## Reporting issues
 
 Include: the dsh version, plugin commit, reproduction steps, and (when
-relevant) the SQLite state under `~/.local/share/dsh-literature/`.
+relevant) the SQLite state under `~/dsh-literature/Data/`.

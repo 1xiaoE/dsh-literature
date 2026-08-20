@@ -17,6 +17,8 @@ export const CSS = {
   backendBanner: 'dsh-lit-backend-banner', empty: 'dsh-lit-empty', footer: 'dsh-lit-footer',
 } as const
 
+export const TOP_ROW_GRID_COLUMNS = 'minmax(0, 1.28fr) minmax(380px, 1fr)'
+
 const cssText = `
 [data-dsh-literature-view] {
   position: absolute;
@@ -117,7 +119,7 @@ html[data-dsh-literature-active]:not([data-dsh-taskboard-active]):not([data-dsh-
 .${CSS.grid} { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; }
 .${CSS.topRow} {
   display: grid;
-  grid-template-columns: minmax(0, 1.62fr) minmax(280px, 1fr);
+  grid-template-columns: ${TOP_ROW_GRID_COLUMNS};
   gap: 9px;
   flex: none;
   height: clamp(172px, 22vh, 218px);
@@ -223,7 +225,7 @@ html[data-dsh-literature-active]:not([data-dsh-taskboard-active]):not([data-dsh-
 .${CSS.authLabel} { color: var(--dsh-lit-text-muted); font-size: var(--dsh-lit-font-caption); font-weight: 600; }
 .${CSS.authValue} { color: var(--dsh-lit-text); font-size: var(--dsh-lit-font-secondary); overflow-wrap: anywhere; }
 
-.${CSS.search} { padding: 0 11px 9px; gap: 6px; }
+.${CSS.search} { padding: 0 11px 9px; gap: 6px; overflow-y: auto; }
 .${CSS.search} .${CSS.panelTitle} { padding-left: 0; }
 .${CSS.searchModes} { display: flex; gap: 3px; padding: 2px; width: fit-content; background: var(--dsh-lit-bg-card); border: 1px solid var(--dsh-lit-border); border-radius: 8px; }
 .${CSS.searchMode} { padding: 4px 8px; color: var(--dsh-lit-text-muted); background: transparent; border: 0; border-radius: 6px; cursor: pointer; font: inherit; font-size: var(--dsh-lit-font-caption); line-height: 1.25; }

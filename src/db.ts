@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { resolvePaperFields } from './lib/research_fields.js'
 import { migrations } from './migrations/index.js'
 
-export const SCHEMA_VERSION = 21
+export const SCHEMA_VERSION = 22
 
 export type Db = DatabaseSync
 

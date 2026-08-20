@@ -25,7 +25,7 @@ reachable one.
 - **Credentials**: OpenAlex API keys are read from the environment
   (`OPENALEX_API_KEY`) only — never committed, never logged, never stored in
   SQLite. `~/.dsh` profile data belongs to the harness.
-- **Runtime data** lives under `~/.local/share/dsh-literature/` (SQLite, PDFs,
+- **Runtime data** lives under `~/dsh-literature/Data/` (SQLite, PDFs,
   reports, browser profile, publisher session ledger). The browser profile is a
   dedicated persistent profile — never your daily browser.
 - **Publisher login (HITL)**: the login CLI opens a headed browser for the user

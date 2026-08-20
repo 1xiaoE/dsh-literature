@@ -10,13 +10,14 @@
  * rows — it can read the live job row.
  *
  * The workflow itself is never re-implemented: the CLI
- * (bin/dsh-literature-push.mjs → headless dsh profile) stays the single
+ * (bin/dsh-literature-push.mjs → selected Harness profile) stays the single
  * executor.
  */
 import { spawn, type StdioOptions } from 'node:child_process'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
 import type { Db } from '../db.js'
+import { classifyWorkflowError, failureFor, redactSensitiveText, type WorkflowErrorCode } from './workflow_errors.js'
 
 export type RunnerKind = 'push' | 'resume'
 export type RunnerStatus = 'running' | 'exited' | 'failed'
@@ -33,6 +34,10 @@ export interface RunnerJob {
   exitCode: number | null
   logPath: string | null
   message: string | null
+  errorCode: WorkflowErrorCode | null
+  retryable: boolean | null
+  provider: string | null
+  model: string | null
 }
 
 export interface RunnerJobRecord {
@@ -47,6 +52,10 @@ export interface RunnerJobRecord {
   exit_code: number | null
   log_path: string | null
   message: string | null
+  error_code: WorkflowErrorCode | null
+  retryable: number | null
+  provider: string | null
+  model: string | null
 }
 
 export interface RunOutcome {
@@ -55,6 +64,16 @@ export interface RunOutcome {
   pid: number | null
   logPath: string | null
   message: string
+  errorCode?: WorkflowErrorCode
+  retryable?: boolean
+  provider?: string | null
+  model?: string | null
+}
+
+/** A live Harness Agent task accepted by the in-process workflow runner. */
+export interface InProcessRun {
+  /** Settles when the Agent reaches its terminal idle outcome. */
+  done: Promise<void>
 }
 
 export interface RunnerServiceOptions {
@@ -68,7 +87,7 @@ export interface RunnerServiceOptions {
 /** Env keys the harness treats as internal/sensitive and scrubs from children. */
 const SENSITIVE_ENV_PATTERN = /(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)/i
 /** Explicit allowlist: legitimate runner config that may look "sensitive". */
-const RUNNER_ENV_ALLOWLIST = new Set(['OPENALEX_API_KEY'])
+const RUNNER_ENV_ALLOWLIST = new Set(['OPENALEX_API_KEY', 'DSH_LITERATURE_PROFILE'])
 /** Max chars of the runner log tail embedded in the failure message. */
 const FAILURE_TAIL_CHARS = 800
 
@@ -77,6 +96,8 @@ function mapJob(row: RunnerJobRecord): RunnerJob {
     runId: row.run_id, kind: row.kind, pushId: row.push_id, pid: row.pid,
     status: row.status, startedAt: row.started_at, heartbeatAt: row.heartbeat_at,
     finishedAt: row.finished_at, exitCode: row.exit_code, logPath: row.log_path, message: row.message,
+    errorCode: row.error_code, retryable: row.retryable === null ? null : row.retryable === 1,
+    provider: row.provider, model: row.model,
   }
 }
 
@@ -85,6 +106,8 @@ function toRow(row: RunnerJob): RunnerJobRecord {
     run_id: row.runId, kind: row.kind, push_id: row.pushId, pid: row.pid, status: row.status,
     started_at: row.startedAt, heartbeat_at: row.heartbeatAt, finished_at: row.finishedAt,
     exit_code: row.exitCode, log_path: row.logPath, message: row.message,
+    error_code: row.errorCode, retryable: row.retryable === null ? null : row.retryable ? 1 : 0,
+    provider: row.provider, model: row.model,
   }
 }
 
@@ -129,7 +152,8 @@ export class RunnerService {
   /** Latest persisted job (the live one when running), or null. */
   latestJob(): RunnerJob | null {
     const row = this.db.prepare(
-      `SELECT run_id, kind, push_id, pid, status, started_at, heartbeat_at, finished_at, exit_code, log_path, message
+      `SELECT run_id, kind, push_id, pid, status, started_at, heartbeat_at, finished_at, exit_code, log_path, message,
+              error_code, retryable, provider, model
        FROM runner_jobs ORDER BY run_id DESC LIMIT 1`,
     ).get() as RunnerJobRecord | undefined
     return row === undefined ? null : mapJob(row)
@@ -150,13 +174,84 @@ export class RunnerService {
   }
 
   /**
+   * Register a workflow driven by an Agent in this Harness process. The caller
+   * creates the Agent before resolving `start`, so configuration failures reach
+   * the HTTP response; the longer Agent turn continues in the background.
+   */
+  async startInProcess(
+    kind: RunnerKind,
+    selection: { provider: string; model: string },
+    start: () => Promise<InProcessRun>,
+  ): Promise<RunOutcome> {
+    if (this.isActive()) {
+      return { ...failureFor('WORKFLOW_ALREADY_RUNNING'), runId: null, pid: null, logPath: null }
+    }
+    const insert = this.db.prepare(
+      `INSERT INTO runner_jobs (kind, push_id, pid, status, started_at, heartbeat_at, message, provider, model)
+       VALUES (?, NULL, NULL, 'running', datetime('now'), datetime('now'), ?, ?, ?)`,
+    ).run(kind, 'started in current Harness profile', selection.provider, selection.model)
+    const runId = Number(insert.lastInsertRowid)
+    this.active.add(runId)
+    const finish = (status: RunnerStatus, exitCode: number, message: string, failure?: ReturnType<typeof classifyWorkflowError>): void => {
+      this.active.delete(runId)
+      this.db.prepare(
+        `UPDATE runner_jobs SET status = ?, exit_code = ?, finished_at = datetime('now'), message = ?,
+                error_code = ?, retryable = ?, provider = ?, model = ?
+         WHERE run_id = ?`,
+      ).run(
+        status,
+        exitCode,
+        message,
+        failure?.errorCode ?? null,
+        failure === undefined ? null : failure.retryable ? 1 : 0,
+        selection.provider,
+        selection.model,
+        runId,
+      )
+    }
+    try {
+      const run = await start()
+      const heartbeat = setInterval(() => this.persistHeartbeat(runId), 60_000)
+      void run.done.then(
+        () => {
+          clearInterval(heartbeat)
+          finish('exited', 0, 'completed in current Harness profile')
+        },
+        (error: unknown) => {
+          clearInterval(heartbeat)
+          const failure = classifyWorkflowError(error instanceof Error ? error.message : String(error), selection)
+          finish('exited', 1, failure.message, failure)
+        },
+      )
+      return {
+        ok: true,
+        runId,
+        pid: null,
+        logPath: null,
+        provider: selection.provider,
+        model: selection.model,
+        message: 'started in current Harness profile',
+      }
+    } catch (error) {
+      const failure = classifyWorkflowError(error instanceof Error ? error.message : String(error), selection)
+      finish('failed', 1, failure.message, failure)
+      return { ...failure, runId, pid: null, logPath: null }
+    }
+  }
+
+  /**
    * Spawn one workflow run and persist its job row. Returns the outcome with
    * the runId/pid/logPath; a crash inside the grace window is reported with
    * the actual failure detail.
    */
   async start(kind: RunnerKind, args: string[], opts: { bin: string; pushId?: number | null; message?: string }): Promise<RunOutcome> {
     if (this.isActive()) {
-      return { ok: false, runId: null, pid: null, logPath: null, message: 'WORKFLOW_ALREADY_RUNNING' }
+      return {
+        ...failureFor('WORKFLOW_ALREADY_RUNNING'),
+        runId: null,
+        pid: null,
+        logPath: null,
+      }
     }
     const logDir = this.options.logDir
     const logPath = logDir === null ? null : (mkdirSync(logDir, { recursive: true }), join(logDir, `runner-${Date.now()}.log`))
@@ -188,12 +283,28 @@ export class RunnerService {
     // the durable UI log for a live runner.
     child.stdout?.on('data', captureOutput)
     child.stderr?.on('data', captureOutput)
-    const finish = (status: RunnerStatus, exitCode: number | null, message: string | null): void => {
+    const finish = (
+      status: RunnerStatus,
+      exitCode: number | null,
+      message: string | null,
+      failure?: ReturnType<typeof classifyWorkflowError>,
+    ): void => {
       this.active.delete(runId)
       this.db.prepare(
-        `UPDATE runner_jobs SET status = ?, exit_code = ?, finished_at = datetime('now'), message = COALESCE(?, message)
+        `UPDATE runner_jobs SET status = ?, exit_code = ?, finished_at = datetime('now'), message = COALESCE(?, message),
+                error_code = COALESCE(?, error_code), retryable = COALESCE(?, retryable),
+                provider = COALESCE(?, provider), model = COALESCE(?, model)
          WHERE run_id = ?`,
-      ).run(status, exitCode, message, runId)
+      ).run(
+        status,
+        exitCode,
+        message,
+        failure?.errorCode ?? null,
+        failure === undefined ? null : failure.retryable ? 1 : 0,
+        failure?.provider ?? null,
+        failure?.model ?? null,
+        runId,
+      )
     }
 
     const earlyExit = await new Promise<{ code: number | null; signal: string | null; spawnError?: string } | null>((resolve) => {
@@ -213,15 +324,13 @@ export class RunnerService {
     if (earlyExit !== null) {
       await closeLog(log)
       if (earlyExit.code !== 0) {
+        const rawFailure = earlyExit.spawnError ?? (capturedOutput || (logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''))
+        const failure = classifyWorkflowError(rawFailure)
         const message = earlyExit.spawnError !== undefined
-          ? `runner spawn failed: ${earlyExit.spawnError}`
-          : formatRunnerFailure(
-            earlyExit.code,
-            earlyExit.signal,
-            capturedOutput || (logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''),
-          )
-        finish(earlyExit.spawnError !== undefined ? 'failed' : 'exited', earlyExit.code, message)
-        return { ok: false, runId, pid, logPath, message }
+          ? redactSensitiveText(`runner spawn failed: ${earlyExit.spawnError}`)
+          : `${failure.message} ${formatRunnerFailure(earlyExit.code, earlyExit.signal, rawFailure)}`
+        finish(earlyExit.spawnError !== undefined ? 'failed' : 'exited', earlyExit.code, message, failure)
+        return { ...failure, message, runId, pid, logPath }
       }
       finish('exited', 0, `finished ${opts.bin} ${args.join(' ')} (exit 0)`)
       return { ok: true, runId, pid, logPath, message: `finished ${opts.bin} ${args.join(' ')} (exit 0)` }
@@ -235,12 +344,18 @@ export class RunnerService {
     }, 60_000)
     child.once('exit', (code) => {
       clearInterval(heartbeat)
-      finish('exited', code, null)
+      if (code !== null && code !== 0) {
+        const failure = classifyWorkflowError(capturedOutput)
+        finish('exited', code, failure.message, failure)
+      } else {
+        finish('exited', code, null)
+      }
       if (log !== undefined) { try { log.end() } catch { /* closed */ } }
     })
     child.once('error', () => {
       clearInterval(heartbeat)
-      finish('failed', -1, 'runner process error')
+      const failure = classifyWorkflowError('runner process error')
+      finish('failed', -1, failure.message, failure)
       if (log !== undefined) { try { log.end() } catch { /* closed */ } }
     })
     child.unref()
@@ -255,7 +370,7 @@ export class RunnerService {
 /** Human-readable runner failure line (pure — testable). */
 export function formatRunnerFailure(code: number | null, signal: string | null, tail: string): string {
   const where = code !== null ? `exit code ${code}` : `signal ${signal ?? 'unknown'}`
-  const detail = tail.trim().split('\n').slice(-8).join(' | ').trim().slice(0, FAILURE_TAIL_CHARS)
+  const detail = redactSensitiveText(tail).trim().split('\n').slice(-8).join(' | ').trim().slice(0, FAILURE_TAIL_CHARS)
   return `runner exited early (${where})${detail !== '' ? `: ${detail}` : ''}`
 }
 
@@ -268,8 +383,8 @@ export function runnerChildEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.
   for (const [key, value] of Object.entries(parent)) {
     if (value === undefined) continue
     const upper = key.toUpperCase()
-    if (upper.startsWith('DSH_')) continue
     if (RUNNER_ENV_ALLOWLIST.has(key)) { env[key] = value; continue }
+    if (upper.startsWith('DSH_')) continue
     if (SENSITIVE_ENV_PATTERN.test(key)) continue
     env[key] = value
   }

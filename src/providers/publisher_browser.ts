@@ -22,7 +22,7 @@
  *   - auto-filling accounts, passwords, CAPTCHAs, or institutional credentials
  *
  * The provider uses the SAME independent persistent profile as the legacy
- * CARSI provider (~/.local/share/dsh-literature/browser-profile) and never
+ * CARSI provider (~/dsh-literature/Data/browser-profile) and never
  * reads the user's daily browser cookies. Sessions are reused across pushes
  * until they expire (then AUTH_REQUIRED → HITL re-login).
  */

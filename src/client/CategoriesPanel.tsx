@@ -17,7 +17,8 @@ const GROUP_KEYS: Record<UiCategory['kind'], LiteratureKey> = {
 }
 
 const WORKFLOW: Record<string, { key: LiteratureKey; icon: string }> = {
-  all: { key: 'category.all', icon: '▤' }, selected: { key: 'category.selected', icon: '✓' },
+  all: { key: 'category.all', icon: '▤' }, library: { key: 'category.library', icon: '▥' },
+  selected: { key: 'category.selected', icon: '✓' },
   'to-read': { key: 'category.toRead', icon: '◌' },
   read: { key: 'category.read', icon: '▣' }, reports: { key: 'category.reports', icon: '≣' },
   favorites: { key: 'category.favorites', icon: '☆' },

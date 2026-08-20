@@ -35,13 +35,20 @@ export interface PushNowOutput {
   instructions: string[]
 }
 
+/** Resolve the user's first topic, then keep using the latest topic on resume-less pushes. */
+function resolveWorkflowTopic(rt: LiteratureRuntime, input?: string) {
+  const requested = input?.trim() || (rt.db.prepare('SELECT topic FROM pushes ORDER BY id DESC LIMIT 1').get() as { topic?: string } | undefined)?.topic?.trim()
+  if (!requested) throw new Error('INVALID_ARGUMENT: first literature push requires a topic')
+  return resolveTopic(rt.cfg.topics, requested)
+}
+
 export function defineLiteraturePushNow(getRt: () => LiteratureRuntime, modelRoute: () => string | null) {
   return defineTool({
     name: 'literature_push_now',
     description:
       '开始一次文献精选推送：创建推送记录并返回分步工作流指令（Query Planner 检索→语义排序→下载→分块精读→报告→记录）。本工具不含 LLM 调用，执行者是你（agent）。',
     parameters: {
-      topic: { type: 'string', description: '主题 id 或显示名，缺省用配置默认主题' },
+      topic: { type: 'string', description: '首次执行必填；后续省略时沿用最近主题，也可输入新主题切换' },
     },
     output: {
       schema: {
@@ -80,7 +87,7 @@ export function defineLiteraturePushNow(getRt: () => LiteratureRuntime, modelRou
     async execute(args: PushNowInput): Promise<PushNowOutput> {
       const rt = getRt()
       const { db, cfg } = rt
-      const topic = resolveTopic(cfg.topics, args.topic)
+      const topic = resolveWorkflowTopic(rt, args.topic)
       ensureStage(db, topic.id, cfg.targetPapersPerStage)
       const stage = getStage(db, topic.id)
       const def = stageDef(cfg.stageOrder, stage.current)

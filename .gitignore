@@ -5,7 +5,8 @@ dist/
 coverage/
 *.tsbuildinfo
 
-# --- runtime data (stays local: ~/.local/share/dsh-literature) ---
+# --- runtime data (local only: ~/dsh-literature/Data) ---
+/Data/
 *.db
 *.sqlite
 *.sqlite3

@@ -6,12 +6,12 @@
  * cleaned up; library papers (Selected / manual import / PDF / read / report /
  * favorite / manual category) are protected from retrieval-history removal.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { openDb, upsertPaper, type Db } from '../src/db.js'
-import { isLibraryPaper, isPaperFavorite, isPaperOrphaned, removeRetrievedBatch, removeRetrievedRecordSafely, togglePaperFavorite } from '../src/lib/library.js'
+import { deleteLibraryPapers, isLibraryPaper, isPaperFavorite, isPaperOrphaned, removeRetrievedBatch, removeRetrievedRecordSafely, togglePaperFavorite } from '../src/lib/library.js'
 import { listPaperFields, listResearchFields, resolvePaperFields } from '../src/lib/research_fields.js'
 import { listCategories, listPapers, getDashboard } from '../src/ui/adapter.js'
 
@@ -198,6 +198,21 @@ describe('library pool — Research Fields / Topics only count library papers', 
 })
 
 describe('library pool — safe retrieved removal', () => {
+  it('deletes selected library papers and their managed PDF files', () => {
+    const t = tempDb()
+    try {
+      const pdfFile = join(t.dir, 'pdfs', 'paper.pdf')
+      mkdirSync(join(t.dir, 'pdfs'), { recursive: true })
+      writeFileSync(pdfFile, '%PDF-1.4 paper')
+      paper(t.db, 'p:delete', 'Delete Me')
+      attachPdf(t.db, 'p:delete', 'manual', pdfFile)
+      const result = deleteLibraryPapers(t.db, ['p:delete'], t.dir)
+      expect(result).toEqual({ deletedCount: 1, notFoundCount: 0, failedCount: 0 })
+      expect(t.db.prepare('SELECT 1 FROM papers WHERE id = ?').get('p:delete')).toBeUndefined()
+      expect(existsSync(pdfFile)).toBe(false)
+    } finally { close(t) }
+  })
+
   it('single removal of a retrieved-only orphan deletes the paper row', () => {
     const t = tempDb()
     try {

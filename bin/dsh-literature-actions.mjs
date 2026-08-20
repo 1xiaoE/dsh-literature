@@ -16,8 +16,7 @@ import { join } from 'node:path'
 import { openDb } from '../lib/db.js'
 import { listOpenActions, openActionsOfPush, resolveUserAction } from '../lib/lib/user_actions.js'
 
-const XDG = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share')
-const DEFAULT_DATA_DIR = join(XDG, 'dsh-literature')
+const DEFAULT_DATA_DIR = join(homedir(), 'dsh-literature', 'Data')
 
 function parseArgs(argv) {
   const out = { cmd: undefined, dataDir: DEFAULT_DATA_DIR, push: undefined, note: undefined, actionId: undefined }
@@ -33,7 +32,7 @@ function parseArgs(argv) {
           '  list                     列出所有 open 待办（五要素）。\n' +
           '  list --push <id>         只看某个 push 的待办。\n' +
           '  resolve <actionId> [--note 说明]  标记完成。\n' +
-          '  --data-dir <dir>         数据目录（默认 XDG）。',
+          '  --data-dir <dir>         数据目录（默认 ~/dsh-literature/Data）。',
       )
       process.exit(0)
     }

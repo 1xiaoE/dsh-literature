@@ -28,8 +28,7 @@ import { DEFAULT_CARSI_USER_AGENT } from '../lib/config.js'
 import { openDb } from '../lib/db.js'
 import { resolveUserActionsByKind } from '../lib/lib/user_actions.js'
 
-const XDG = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share')
-const DEFAULT_DATA_DIR = join(XDG, 'dsh-literature')
+const DEFAULT_DATA_DIR = join(homedir(), 'dsh-literature', 'Data')
 const DEFAULT_PROFILE_DIR = join(DEFAULT_DATA_DIR, 'browser-profile')
 
 function parseArgs(argv) {
@@ -56,7 +55,7 @@ function parseArgs(argv) {
           '  --url <url>      打开指定出版社文章页（优先使用 DOI 直连后的页面）。\n' +
           '  --push <id>      使用该 push 的 AUTH_REQUIRED 论文（自动取 DOI/URL）。\n' +
           '  --check          只检查会话状态，不打开浏览器。\n' +
-          '  --data-dir       数据目录（默认 XDG ~/.local/share/dsh-literature）。\n' +
+          '  --data-dir       数据目录（默认 ~/dsh-literature/Data）。\n' +
           '  --profile-dir    浏览器 profile 目录（默认 <data-dir>/browser-profile）。\n' +
           '  --timeout-min    登录等待上限分钟（默认 15）。',
       )

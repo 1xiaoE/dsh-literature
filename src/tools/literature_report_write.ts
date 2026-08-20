@@ -1,7 +1,7 @@
 /**
  * Tool: literature_report_write — the ONLY way the canonical report is
  * persisted. The agent never writes the canonical path through its shell
- * (the harness sandbox may not reach the XDG data dir); the plugin process
+ * (the harness sandbox may not reach the isolated data dir); the plugin process
  * owns it: mkdir recursive → temp write → atomic rename.
  *
  * On internal write failure the tool returns { ok: false, errorCode:
@@ -42,7 +42,7 @@ export function defineLiteratureReportWrite(getRt: () => LiteratureRuntime) {
   return defineTool({
     name: 'literature_report_write',
     description:
-      '写 canonical 精读报告（plugin 进程负责，不经过你的 shell）：~/.local/share/dsh-literature/reports/<stageLabel>/<filename>.md，mkdir recursive + temp write + atomic rename，返回 reportPath。失败返回 REPORT_WRITE_FAILED/SYSTEM_ERROR（此时用 literature_record 记 status=failed，不要当作需要用户介入）。',
+      '写 canonical 精读报告（plugin 进程负责，不经过你的 shell）：~/dsh-literature/Data/reports/<stageLabel>/<filename>.md，mkdir recursive + temp write + atomic rename，返回 reportPath。失败返回 REPORT_WRITE_FAILED/SYSTEM_ERROR（此时用 literature_record 记 status=failed，不要当作需要用户介入）。',
     parameters: {
       pushId: { type: 'integer', required: true, description: '推送号' },
       stageLabel: { type: 'string', required: true, description: '阶段标签（作为 canonical 子目录，如 基础控制）' },

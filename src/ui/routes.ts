@@ -5,8 +5,8 @@
  * the harness webServer (registered only when a web profile is running; the
  * headless profile never mounts a webserver and is unaffected). Handlers are
  * thin: they read the existing SQLite through src/ui/adapter.ts and, for
- * Run/Resume, spawn the EXISTING CLI workflow (bin/dsh-literature-push.mjs)
- * — no new retrieval/ranking/acquisition/database anywhere.
+ * Run/Resume, drive an Agent in the active Harness profile — no new
+ * retrieval/ranking/acquisition/database anywhere.
  *
  * Every route carries a loopback-only trust fence (mirrors dsh-ssh): these
  * endpoints can launch agent runs, so LAN-exposed deployments must not serve
@@ -34,6 +34,7 @@ import {
   type PapersFilter,
 } from './adapter.js'
 import type { UiRunResult } from './types.js'
+import type { UiModelSelection, UiModelSelectionInput } from './types.js'
 import {
   assignPaperField,
   createResearchField,
@@ -43,8 +44,10 @@ import {
   removePaperField,
   renameResearchField,
 } from '../lib/research_fields.js'
+import { deleteLibraryPapers } from '../lib/library.js'
 import { enrichPaperMetadata, importLocalPdfFromFile } from '../lib/library_import.js'
 import { startDeepRead } from '../lib/deep_read.js'
+import { classifyWorkflowError, failureFor, type WorkflowErrorCode } from '../lib/workflow_errors.js'
 
 /** Minimal structural WebRoute (matches @deepseek-ai/dsh-host-webserver). */
 export interface WebRouteLike {
@@ -58,6 +61,8 @@ export interface UiRouteDeps {
   getRt: () => LiteratureRuntime
   startPush?: (keyword: string, rt?: LiteratureRuntime) => UiRunResult | Promise<UiRunResult>
   startResume?: (pushId: number, rt?: LiteratureRuntime) => UiRunResult | Promise<UiRunResult>
+  modelSelection?: () => UiModelSelection | Promise<UiModelSelection>
+  saveModelSelection?: (input: UiModelSelectionInput) => UiModelSelection | Promise<UiModelSelection>
 }
 
 /** Cap on JSON request bodies (Run/Resume payloads are tiny). */
@@ -95,6 +100,17 @@ function writeJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'referrer-policy': 'no-referrer' })
   res.end(payload)
+}
+
+function workflowStatus(code: WorkflowErrorCode | undefined): number {
+  if (code === 'INVALID_ARGUMENT') return 400
+  if (code === 'INVALID_MODEL') return 400
+  if (code === 'WORKFLOW_ALREADY_RUNNING' || code === 'RESUME_NOT_AVAILABLE') return 409
+  return 500
+}
+
+function writeWorkflowFailure(res: ServerResponse, status: number, code: WorkflowErrorCode): void {
+  writeJson(res, status, failureFor(code))
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown> | undefined> {
@@ -258,6 +274,36 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
         if (rest === '/push-status' && guard(req, res, 'GET')) {
           const rt = deps.getRt()
           writeJson(res, 200, getPushStatus(rt.db, rt.cfg))
+          return
+        }
+        if (rest === '/model-selection') {
+          if (req.method === 'GET') {
+            if (!guard(req, res, 'GET')) return
+            const selection = await (deps.modelSelection?.() ?? { current: null, options: [] })
+            writeJson(res, 200, selection)
+            return
+          }
+          if (!guard(req, res, 'POST')) return
+          const body = await readJsonBody(req)
+          const provider = typeof body?.provider === 'string' ? body.provider.trim() : ''
+          const model = typeof body?.model === 'string' ? body.model.trim() : ''
+          if (provider === '' || model === '') {
+            writeWorkflowFailure(res, 400, 'INVALID_MODEL')
+            return
+          }
+          const selection = await (deps.modelSelection?.() ?? { current: null, options: [] })
+          const providerOptions = selection.options.find((option) => option.provider === provider)
+          const modelExists = providerOptions?.models.some((candidate) => candidate.id === model) ?? false
+          if (!modelExists || deps.saveModelSelection === undefined) {
+            writeWorkflowFailure(res, 400, 'INVALID_MODEL')
+            return
+          }
+          try {
+            writeJson(res, 200, await deps.saveModelSelection({ provider, model }))
+          } catch (error) {
+            const failure = classifyWorkflowError(error instanceof Error ? error.message : String(error), { provider, model })
+            writeJson(res, workflowStatus(failure.errorCode), failure)
+          }
           return
         }
         if (rest === '/papers' && guard(req, res, 'GET')) {
@@ -445,6 +491,18 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
           } catch (error) { categoryError(res, error) }
           return
         }
+        if (rest === '/library/bulk-delete' && guard(req, res, 'POST')) {
+          const body = await readJsonBody(req)
+          const paperIds = Array.isArray(body?.paperIds) ? body.paperIds.filter((x): x is string => typeof x === 'string' && x.length > 0) : []
+          if (paperIds.length === 0) {
+            err(res, 400, 'missing paperIds array')
+            return
+          }
+          try {
+            writeJson(res, 200, deleteLibraryPapers(deps.getRt().db, paperIds, deps.getRt().dataDir))
+          } catch (error) { categoryError(res, error) }
+          return
+        }
         if (rest.startsWith('/papers/') && guard(req, res, 'GET')) {
           const rt = deps.getRt()
           const id = decodeId(rest.slice('/papers/'.length))
@@ -463,32 +521,36 @@ export function makeUiRoutes(deps: UiRouteDeps): WebRouteLike {
         if (rest === '/run' && guard(req, res, 'POST')) {
           const rt = deps.getRt()
           if (workflowAlreadyRunning(rt.db)) {
-            err(res, 409, 'WORKFLOW_ALREADY_RUNNING')
+            writeWorkflowFailure(res, 409, 'WORKFLOW_ALREADY_RUNNING')
             return
           }
           const body = await readJsonBody(req)
           if (body === undefined) {
-            err(res, 400, 'invalid JSON body')
+            writeWorkflowFailure(res, 400, 'INVALID_ARGUMENT')
             return
           }
           const keyword = typeof body?.keyword === 'string' ? body.keyword.trim() : ''
+          if (keyword === '' && rt.db.prepare('SELECT 1 FROM pushes LIMIT 1').get() === undefined) {
+            writeWorkflowFailure(res, 400, 'INVALID_ARGUMENT')
+            return
+          }
           const result = await (deps.startPush ?? startPush)(keyword, rt)
-          writeJson(res, result.ok ? 200 : result.errorCode === 'WORKFLOW_ALREADY_RUNNING' ? 409 : 500, result)
+          writeJson(res, result.ok ? 200 : workflowStatus(result.errorCode), result)
           return
         }
         if (rest === '/resume' && guard(req, res, 'POST')) {
           const body = await readJsonBody(req)
           const pushId = typeof body?.pushId === 'number' && Number.isInteger(body.pushId) ? body.pushId : undefined
           if (pushId === undefined) {
-            err(res, 400, 'missing integer pushId')
+            writeWorkflowFailure(res, 400, 'INVALID_ARGUMENT')
             return
           }
           if (!canResumePush(deps.getRt().db, pushId)) {
-            err(res, 409, 'RESUME_NOT_AVAILABLE')
+            writeWorkflowFailure(res, 409, 'RESUME_NOT_AVAILABLE')
             return
           }
           const result = await (deps.startResume ?? startResume)(pushId, deps.getRt())
-          writeJson(res, result.ok ? 200 : result.errorCode === 'WORKFLOW_ALREADY_RUNNING' ? 409 : 500, result)
+          writeJson(res, result.ok ? 200 : workflowStatus(result.errorCode), result)
           return
         }
         if (rest === '/runner-log' && guard(req, res, 'GET')) {

@@ -11,6 +11,7 @@
  * progress counters) — the workflow itself is untouched.
  */
 import { spawn, type StdioOptions } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, type WriteStream } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +22,8 @@ import { expandHome } from '../lib/paths.js'
 import { listPaperFields, listResearchFields } from '../lib/research_fields.js'
 import { libraryPaperExistsSql } from '../lib/library.js'
 import { RunnerService } from '../lib/runner_service.js'
+import { buildResumePrompt, buildTaskPrompt } from '../lib/workflow_prompt.js'
+import { classifyWorkflowError, failureFor, redactSensitiveText } from '../lib/workflow_errors.js'
 import {
   isPaperFavorite,
   removeRetrievedBatch,
@@ -50,6 +53,7 @@ import type {
  */
 const WORKFLOW_CATEGORIES: Array<{ id: string; label: string }> = [
   { id: 'all', label: 'Retrieved' },
+  { id: 'library', label: 'Library' },
   { id: 'selected', label: 'Selected' },
   { id: 'to-read', label: 'To Read' },
   { id: 'read', label: 'Read' },
@@ -218,7 +222,7 @@ function paperReportAsset(db: Db, paperId: string): (ReportAssetRow & { path: st
     .find((row): row is ReportAssetRow & { path: string } => row.path !== null)
 }
 
-function toSummary(db: Db, row: PaperRow, pdfPath: string | null = usableFile(row.pdf_path), reportPath: string | null = usableFile(row.report_path)): UiPaperSummary {
+function toSummary(db: Db, row: PaperRow, pdfPath: string | null = usableFile(row.pdf_path), reportPath: string | null = usableFile(row.report_path), isOpenAccess: boolean | null = null): UiPaperSummary {
   return {
     id: row.id,
     title: row.title,
@@ -231,6 +235,7 @@ function toSummary(db: Db, row: PaperRow, pdfPath: string | null = usableFile(ro
     finalScore: row.final_score,
     selected: (row.selected_count ?? 0) > 0,
     hasPdf: pdfPath !== null,
+    isOpenAccess,
     readCount: row.read_count ?? 0,
     fulltextChunks: row.fulltext_chunks ?? null,
     readCoverage: row.fulltext_chunks && row.fulltext_chunks > 0 ? Math.min(1, (row.read_count ?? 0) / row.fulltext_chunks) : null,
@@ -262,6 +267,8 @@ function papersWhere(db: Db, filter: PapersFilter): { where: string[]; params: s
 
   if (category === 'all' || category === '') {
     // no filter
+  } else if (category === 'library') {
+    where.push(libraryPaperExistsSql('p'))
   } else if (category === 'selected') {
     where.push("EXISTS (SELECT 1 FROM candidates c WHERE c.paper_id = p.id AND c.selection_outcome = 'SELECTED')")
   } else if (category === 'to-read') {
@@ -328,7 +335,7 @@ export function listPapers(db: Db, filter: PapersFilter = {}): UiPaperSummary[] 
   const papers = rows.map((row) => {
     const fetch = assets.pdf.get(row.id)
     const report = assets.report.get(row.id)
-    return { paper: toSummary(db, row, fetch?.path ?? null, report?.path ?? null), reportPushId: report?.id ?? 0 }
+    return { paper: toSummary(db, row, fetch?.path ?? null, report?.path ?? null, fetch?.is_open_access === null || fetch?.is_open_access === undefined ? null : fetch.is_open_access === 1), reportPushId: report?.id ?? 0 }
   })
   if (category === 'reports') {
     return papers
@@ -375,7 +382,7 @@ export function getPaperDetail(db: Db, id: string): UiPaperDetail | null {
   ).get(id) as { status: string | null; chunk_count: number | null } | undefined
 
   const report = paperReportAsset(db, id)
-  const base = toSummary(db, row, fetchAssets.usable?.path ?? null, report?.path ?? null)
+  const base = toSummary(db, row, fetchAssets.usable?.path ?? null, report?.path ?? null, fetchAssets.usable?.is_open_access === null || fetchAssets.usable?.is_open_access === undefined ? null : fetchAssets.usable.is_open_access === 1)
 
   return {
     ...base,
@@ -391,7 +398,7 @@ export function getPaperDetail(db: Db, id: string): UiPaperDetail | null {
     metadataSource: row.metadata_source,
     affiliation: row.affiliation,
     keywords: (() => { try { const parsed: unknown = JSON.parse(row.keywords ?? '[]'); return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [] } catch { return [] } })(),
-    metadataStatus: row.title && row.authors && row.year && row.venue ? 'complete' : 'partial',
+    metadataStatus: row.title && parseAuthors(row.authors).length > 0 && row.year && row.venue ? 'complete' : 'partial',
     selectionReason: cand?.rationale ?? null,
     stage: cand?.stage ?? null,
     selectionOutcome: cand?.selection_outcome ?? null,
@@ -422,6 +429,8 @@ export function listCategories(db: Db): UiCategory[] {
   for (const w of WORKFLOW_CATEGORIES) {
     const n = w.id === 'all'
       ? scalarCount('SELECT COUNT(*) AS n FROM papers')
+      : w.id === 'library'
+        ? countPapers(db, { category: 'library' })
       : w.id === 'selected'
         ? scalarCount("SELECT COUNT(DISTINCT paper_id) AS n FROM candidates WHERE selection_outcome = 'SELECTED'")
         : w.id === 'to-read'
@@ -567,6 +576,29 @@ function derivePhase(push: PushRow, progress: LiveProgress): UiPushPhase {
   return 'reading'
 }
 
+/**
+ * Project the latest child-process lifecycle into the execution payload.
+ * A runner can fail before literature_push_now creates a pushes row, so this
+ * is deliberately separate from the persisted push phase. Older runner jobs
+ * are hidden once a newer push has started.
+ */
+function runnerStatus(db: Db, pushStartedAt?: string): UiPushStatus['runner'] {
+  const job = new RunnerService(db).latestJob()
+  if (job === null || (pushStartedAt !== undefined && job.startedAt < pushStartedAt)) return null
+  return {
+    status: job.status,
+    kind: job.kind,
+    message: job.message,
+    errorCode: job.errorCode,
+    retryable: job.retryable,
+    provider: job.provider,
+    model: job.model,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    logPath: job.logPath,
+  }
+}
+
 /** Execution panel payload for the latest push (real persisted state). */
 export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
   const push = db.prepare('SELECT * FROM pushes ORDER BY id DESC LIMIT 1').get() as PushRow | undefined
@@ -596,6 +628,7 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
       authRequired: null,
       notes: null,
       perf: { retrievalMs: null, rankingMs: null, totalMs: null, llmCallCount: null },
+      runner: runnerStatus(db),
     }
   }
 
@@ -787,6 +820,7 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
       totalMs: push.total_ms,
       llmCallCount: push.llm_call_count,
     },
+    runner: runnerStatus(db, push.started_at),
   }
 }
 
@@ -802,6 +836,38 @@ export function getPushStatus(db: Db, cfg?: LiteratureConfig): UiPushStatus {
 /** Absolute path of the shipped CLI workflow runner. */
 function pushCliPath(): string {
   return fileURLToPath(new URL('../../bin/dsh-literature-push.mjs', import.meta.url))
+}
+
+const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/**
+ * Resolve the profile to use for the one-shot workflow runner.
+ *
+ * The Web host's `web` profile is not itself a task runner: passing it to the
+ * one-shot CLI makes the CLI reject the workflow prompt/arguments. An
+ * explicitly configured DSH_LITERATURE_PROFILE remains available for users
+ * who installed a dedicated workflow profile; otherwise the runner's own
+ * compatibility fallback selects headless.
+ */
+export function currentHarnessProfile(
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const args = argv.slice(2)
+  const envProfile = env.DSH_LITERATURE_PROFILE?.trim()
+  const configuredProfile = envProfile !== undefined && envProfile !== 'web' && PROFILE_NAME.test(envProfile) ? envProfile : undefined
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? ''
+    const value = arg === '--profile'
+      ? args[i + 1]
+      : arg.startsWith('--profile=')
+        ? arg.slice('--profile='.length)
+        : undefined
+    if (value !== undefined && PROFILE_NAME.test(value.trim())) {
+      return value.trim() === 'web' ? configuredProfile : value.trim()
+    }
+  }
+  return configuredProfile
 }
 
 /** CLI argv for a fresh push (custom keyword enters as --topic). Pure — testable. */
@@ -860,7 +926,7 @@ const LOG_SERVE_CHARS = 8000
 /** Human-readable runner failure line (pure — testable). */
 export function formatRunnerFailure(code: number | null, signal: string | null, tail: string): string {
   const where = code !== null ? `exit code ${code}` : `signal ${signal ?? 'unknown'}`
-  const detail = tail.trim().split('\n').slice(-8).join(' | ').trim().slice(0, FAILURE_TAIL_CHARS)
+  const detail = redactSensitiveText(tail).trim().split('\n').slice(-8).join(' | ').trim().slice(0, FAILURE_TAIL_CHARS)
   return `runner exited early (${where})${detail !== '' ? `: ${detail}` : ''}`
 }
 
@@ -868,7 +934,7 @@ export function formatRunnerFailure(code: number | null, signal: string | null, 
 const SENSITIVE_ENV_PATTERN = /(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH)/i
 
 /** Explicit allowlist: legitimate runner config that may look "sensitive". */
-const RUNNER_ENV_ALLOWLIST = new Set(['OPENALEX_API_KEY'])
+const RUNNER_ENV_ALLOWLIST = new Set(['OPENALEX_API_KEY', 'DSH_LITERATURE_PROFILE'])
 
 /**
  * Child env for the workflow runner: the parent env minus harness-internal
@@ -882,8 +948,8 @@ export function runnerChildEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.
   for (const [key, value] of Object.entries(parent)) {
     if (value === undefined) continue
     const upper = key.toUpperCase()
-    if (upper.startsWith('DSH_')) continue
     if (RUNNER_ENV_ALLOWLIST.has(key)) { env[key] = value; continue }
+    if (upper.startsWith('DSH_')) continue
     if (SENSITIVE_ENV_PATTERN.test(key)) continue
     env[key] = value
   }
@@ -930,7 +996,7 @@ export interface RunCliOptions {
  */
 export async function runCli(bin: string, args: string[], opts: RunCliOptions = {}): Promise<UiRunResult> {
   if (opts.flag !== undefined && opts.flag.active) {
-    return { ok: false, errorCode: 'WORKFLOW_ALREADY_RUNNING', message: 'WORKFLOW_ALREADY_RUNNING' }
+    return { ...failureFor('WORKFLOW_ALREADY_RUNNING') }
   }
   const graceMs = opts.graceMs ?? RUNNER_GRACE_MS
   const logPath = runnerLogPath(opts.logDir)
@@ -980,14 +1046,17 @@ export async function runCli(bin: string, args: string[], opts: RunCliOptions = 
   closeLog()
   if (earlyExit.code !== 0) {
     if (earlyExit.spawnError !== undefined) {
-      return { ok: false, pid, logPath, message: `runner spawn failed: ${earlyExit.spawnError}` }
+      const detail = redactSensitiveText(`runner spawn failed: ${earlyExit.spawnError}`)
+      const failure = classifyWorkflowError(detail)
+      return { ...failure, pid, logPath, message: `${failure.message} ${detail}` }
     }
     const tail = logPath !== null && existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''
+    const failure = classifyWorkflowError(tail)
     return {
-      ok: false,
+      ...failure,
       pid,
       logPath,
-      message: formatRunnerFailure(earlyExit.code, earlyExit.signal, tail),
+      message: `${failure.message} ${formatRunnerFailure(earlyExit.code, earlyExit.signal, tail)}`,
     }
   }
   return { ok: true, pid, logPath, message: `finished ${bin} ${args.join(' ')} (exit 0)` }
@@ -1011,10 +1080,23 @@ async function spawnCli(args: string[], rt?: LiteratureRuntime, kind: 'push' | '
   const service = runnerServiceFor(rt)
   // Launch through node explicitly: the .mjs ships without the execute bit
   // (mode 600), so exec'ing it directly fails with EACCES.
-  const out = await service.start(kind, args, { bin: process.execPath, pushId: pushId ?? null })
+  // Node must receive the shipped runner script before its CLI flags; passing
+  // --topic/--resume directly to `node` makes Node reject them as bad options.
+  const profile = currentHarnessProfile()
+  const profileArgs = profile === undefined ? [] : ['--profile', profile]
+  const out = await service.start(kind, [pushCliPath(), ...profileArgs, ...args], { bin: process.execPath, pushId: pushId ?? null })
   // Keep the legacy guard in sync for any caller that still reads it.
   if (out.ok) workflowFlag.active = true
-  return { ok: out.ok, pid: out.pid, logPath: out.logPath, message: out.message }
+  return {
+    ok: out.ok,
+    errorCode: out.errorCode,
+    retryable: out.retryable,
+    provider: out.provider,
+    model: out.model,
+    pid: out.pid,
+    logPath: out.logPath,
+    message: out.message,
+  }
 }
 
 /** One RunnerService per runtime (cheap; rows are the durable source). */
@@ -1024,12 +1106,109 @@ function runnerServiceFor(rt: LiteratureRuntime | undefined): RunnerService {
 
 /** Run the existing workflow with an optional keyword (enters as --topic). */
 export function startPush(keyword: string, rt?: LiteratureRuntime): Promise<UiRunResult> {
+  if (rt !== undefined && keyword.trim() === '' && rt.db.prepare('SELECT 1 FROM pushes LIMIT 1').get() === undefined) {
+    return Promise.resolve({ ...failureFor('INVALID_ARGUMENT') })
+  }
   return spawnCli(pushCliArgs(keyword), rt, 'push', null)
 }
 
 /** Resume a parked push (AUTH_REQUIRED / NEED_USER_ACTION / interrupted). */
 export function startResume(pushId: number, rt?: LiteratureRuntime): Promise<UiRunResult> {
   return spawnCli(resumeCliArgs(pushId), rt, 'resume', pushId)
+}
+
+interface CurrentProfileSelection {
+  provider: string
+  model: string
+}
+
+interface CurrentProfileAgent {
+  followup(message: {
+    id: string
+    role: 'user'
+    content: Array<{ type: 'text'; text: string }>
+    source: { kind: 'user' }
+  }): void
+  whenIdle(): Promise<void>
+  session: { events: readonly unknown[] }
+}
+
+interface CurrentProfileWorkflowDeps {
+  agentDefaultModel?: { currentSelection?: () => CurrentProfileSelection }
+  agents?: {
+    create: (options: {
+      sessionId: string
+      meta: { cwd: string }
+      agentOptions: CurrentProfileSelection
+    }) => Promise<{ agent: CurrentProfileAgent; dispose: () => Promise<void> }>
+  }
+}
+
+function agentFailure(events: readonly unknown[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (typeof event !== 'object' || event === null || (event as { type?: unknown }).type !== 'turn/end') continue
+    const reason = (event as { data?: { reason?: unknown } }).data?.reason
+    if (typeof reason !== 'object' || reason === null || (reason as { kind?: unknown }).kind !== 'error') return null
+    const error = (reason as { error?: { code?: unknown; message?: unknown } }).error
+    const code = typeof error?.code === 'string' ? error.code : 'NETWORK'
+    const message = typeof error?.message === 'string' ? error.message : 'Harness Agent execution failed'
+    return `${code}: ${message}`
+  }
+  return null
+}
+
+/**
+ * Web-only workflow launcher. It creates a temporary Agent in the live
+ * Harness profile, so its selected provider/model and credentials are exactly
+ * the ones visible in the Harness model dialog.
+ */
+export function createCurrentProfileWorkflowRunner(deps: CurrentProfileWorkflowDeps): {
+  startPush: (keyword: string, rt?: LiteratureRuntime) => Promise<UiRunResult>
+  startResume: (pushId: number, rt?: LiteratureRuntime) => Promise<UiRunResult>
+} {
+  const start = async (kind: 'push' | 'resume', prompt: string, rt?: LiteratureRuntime): Promise<UiRunResult> => {
+    const selection = deps.agentDefaultModel?.currentSelection?.()
+    const agents = deps.agents
+    if (selection === undefined || selection.provider.trim() === '' || selection.model.trim() === '' || agents === undefined) {
+      return { ...failureFor('NO_ADAPTER') }
+    }
+    const service = runnerServiceFor(rt)
+    return service.startInProcess(kind, selection, async () => {
+      const handle = await agents.create({
+        sessionId: `literature-${randomUUID()}`,
+        meta: { cwd: process.cwd() },
+        agentOptions: selection,
+      })
+      handle.agent.followup({
+        id: randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+        source: { kind: 'user' },
+      })
+      return {
+        done: (async () => {
+          try {
+            await handle.agent.whenIdle()
+            const failure = agentFailure(handle.agent.session.events)
+            if (failure !== null) throw new Error(failure)
+          } finally {
+            await handle.dispose()
+          }
+        })(),
+      }
+    })
+  }
+
+  return {
+    startPush: (keyword, rt) => {
+      if (rt !== undefined && keyword.trim() === '' && rt.db.prepare('SELECT 1 FROM pushes LIMIT 1').get() === undefined) {
+        return Promise.resolve({ ...failureFor('INVALID_ARGUMENT') })
+      }
+      return start('push', buildTaskPrompt(keyword), rt)
+    },
+    startResume: (pushId, rt) => start('resume', buildResumePrompt(pushId), rt),
+  }
 }
 
 /**
